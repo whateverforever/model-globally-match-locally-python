@@ -19,6 +19,7 @@ import numpy as np
 import numba
 import matplotlib.pyplot as plt
 
+from scipy.spatial import KDTree
 from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 
@@ -94,6 +95,8 @@ def main():
     assert 360 % alpha_num == 0
     alpha_step = np.radians(360 / alpha_num)
 
+    scene_tree = KDTree(scene.vertices)
+
     poses_path = f"{modelbase}_{scenebase}.poses"
     if not os.path.exists(poses_path):
         print("Couldn't find cached poses. Computing anew.")
@@ -106,7 +109,13 @@ def main():
 
             # one accumulator per reference vert
             accumulator = np.zeros((len(model.vertices), alpha_num))
-            for sB in pairs_scene[sA]:
+            
+            # instead of going over all scene pts, just look towards points
+            # that could still be on the object
+            closeby = scene_tree.query_ball_point(scene.vertices[sA], model.scale)
+            print("closeby", len(closeby))
+
+            for sB in closeby:
                 if sA == sB:
                     continue
 
@@ -389,17 +398,13 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     out_Rs = defaultdict(list)
     num_skipped_clusters = 0
     for pose_idx, cluster_idx in enumerate(pose_clusters):
-        if cluster_scores[cluster_idx] < cluster_score_thresh:
-            num_skipped_clusters += 1
-            continue
-
         out_ts[cluster_idx].append(locs[pose_idx])
         out_Rs[cluster_idx].append(rots[pose_idx])
 
-    print("Skipped", num_skipped_clusters, "clusters because score too low")
+    sorted_clusters = np.argsort(cluster_scores)[::-1]
 
     out_poses = []
-    for cluster_idx in out_ts:
+    for cluster_idx in sorted_clusters:
         ts = out_ts[cluster_idx]
         Rs = out_Rs[cluster_idx]
 
