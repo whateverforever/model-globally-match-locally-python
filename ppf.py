@@ -38,7 +38,7 @@ def main():
     model.visual.vertex_colors = [[255, 0, 0, 128] for _ in model.vertices]
     scene.visual.vertex_colors = [[0, 255, 0, 255] for _ in model.vertices]
 
-    if False and VIS:
+    if VIS:
         vis = trimesh.Scene([model, scene])
         vis.show()
 

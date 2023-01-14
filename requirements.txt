@@ -1,0 +1,4 @@
+numpy==1.23.2
+trimesh==3.17.1
+scipy==1.9.1
+matplotlib==3.6.0
