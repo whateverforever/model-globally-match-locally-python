@@ -92,87 +92,107 @@ def main():
     assert 360 % alpha_num == 0
     alpha_step = np.radians(360 / alpha_num)
 
-    idx_scene = 0
-    poses = []
+    poses_path = f"{modelbase}_{scenebase}.poses"
+    if not os.path.exists(poses_path):
+        print("Couldn't find cached poses. Computing anew.")
+        idx_scene = 0
+        poses = []
 
-    print("Num reference verts", len(pairs_scene))
-    for sA in pairs_scene:
-        print("Num paired verts for ref", len(pairs_scene[sA]))
+        print("Num reference verts", len(pairs_scene))
+        for sA in pairs_scene:
+            print(f"{len(pairs_scene[sA])} paired verts for ref {sA}", " " * 20)
 
-        # one accumulator per reference vert
-        accumulator = np.zeros((len(model.vertices), alpha_num))
-        for sB in pairs_scene[sA]:
-            if sA == sB:
-                continue
+            # one accumulator per reference vert
+            accumulator = np.zeros((len(model.vertices), alpha_num))
+            for sB in pairs_scene[sA]:
+                if sA == sB:
+                    continue
 
-            s_feature = pairs_scene[sA][sB]
+                s_feature = pairs_scene[sA][sB]
 
-            if s_feature not in ppfs_model:
-                skipped_features += 1
-                continue
+                if s_feature not in ppfs_model:
+                    skipped_features += 1
+                    continue
 
-            # print(s_feature, s_pairs)
-            s_r = scene.vertices[sA]
-            s_i = scene.vertices[sB]
-            s_normal = scene.vertex_normals[sA]
+                # print(s_feature, s_pairs)
+                s_r = scene.vertices[sA]
+                s_i = scene.vertices[sB]
+                s_normal = scene.vertex_normals[sA]
 
-            R_scene2glob = np.eye(4)
-            R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
-            T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
+                R_scene2glob = np.eye(4)
+                R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
+                T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
 
-            s_ig = (T_scene2glob @ homog(s_i))[:3]
-            alpha_s = np.arccos(np.dot(s_ig, [0, 0, -1]) / np.linalg.norm(s_ig))
+                s_ig = (T_scene2glob @ homog(s_i))[:3]
+                alpha_s = np.arccos(np.dot(s_ig, [0, 0, -1]) / np.linalg.norm(s_ig))
 
-            print("Found", len(ppfs_model[s_feature]), "matching pairs in model", " " * 20, end="\r")
-            for m_pair in ppfs_model[s_feature]:
-                mA, mB = m_pair
-                m_r = model.vertices[mA]
-                m_i = model.vertices[mB]
-                m_normal = model.vertex_normals[mA]
+                print(
+                    "Found",
+                    len(ppfs_model[s_feature]),
+                    "matching pairs in model",
+                    " " * 20,
+                    end="\r",
+                )
+                for m_pair in ppfs_model[s_feature]:
+                    mA, mB = m_pair
+                    m_r = model.vertices[mA]
+                    m_i = model.vertices[mB]
+                    m_normal = model.vertex_normals[mA]
 
+                    R_model2glob = np.eye(4)
+                    R_model2glob[:3, :3] = align_vectors(m_normal, [1, 0, 0])
+                    T_model2glob = R_model2glob @ tf.translation_matrix(-m_r)
+
+                    # TODO: precompute
+                    if m_pair not in model_alphas:
+                        m_ig = (T_model2glob @ homog(m_i))[:3]
+                        alpha_m = np.arccos(
+                            np.dot(m_ig, [0, 0, -1]) / np.linalg.norm(m_ig)
+                        )
+                        model_alphas[m_pair] = alpha_m
+
+                    alpha_m = model_alphas[m_pair]
+                    alpha = alpha_m - alpha_s
+                    # print("Alpha", np.degrees(alpha), "model:", np.degrees(alpha_m), "scene:", np.degrees(alpha_s))
+
+                    alpha_disc = int(alpha // alpha_step)
+                    accumulator[mA, alpha_disc] += 1
+
+            peak_cutoff = np.quantile(accumulator.reshape(-1), 0.99)
+            idxs_peaks = np.argwhere(accumulator > peak_cutoff)
+
+            # import matplotlib.pyplot as plt
+            # plt.imshow(accumulator.T)
+            # plt.show()
+
+            # TODO: vectorize
+            for best_mr, best_alpha in idxs_peaks:
                 R_model2glob = np.eye(4)
-                R_model2glob[:3, :3] = align_vectors(m_normal, [1, 0, 0])
-                T_model2glob = R_model2glob @ tf.translation_matrix(-m_r)
+                R_model2glob[:3, :3] = align_vectors(
+                    model.vertex_normals[best_mr], [1, 0, 0]
+                )
+                T_model2glob = R_model2glob @ tf.translation_matrix(
+                    -model.vertices[best_mr]
+                )
 
-                # TODO: precompute
-                if m_pair not in model_alphas:
-                    m_ig = (T_model2glob @ homog(m_i))[:3]
-                    alpha_m = np.arccos(np.dot(m_ig, [0, 0, -1]) / np.linalg.norm(m_ig))
-                    model_alphas[m_pair] = alpha_m
+                R_alpha = tf.rotation_matrix(
+                    alpha_step * best_alpha, [1, 0, 0], [0, 0, 0]
+                )
+                # TODO: invert homog
+                T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
+                poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
+            # break
 
-                alpha_m = model_alphas[m_pair]
-                alpha = alpha_m - alpha_s
-                # print("Alpha", np.degrees(alpha), "model:", np.degrees(alpha_m), "scene:", np.degrees(alpha_s))
+            idx_scene += 1
+            if idx_scene > 50:
+                break
 
-                alpha_disc = int(alpha // alpha_step)
-                accumulator[mA, alpha_disc] += 1
-
-        # TODO: return all peaks
-        # 0.9  1027
-        # 0.95 1027
-        # 0.99 351
-        peak_cutoff = np.quantile(accumulator.reshape(-1), 0.99)
-        idxs_peaks = np.argwhere(accumulator > peak_cutoff)
-
-        # import matplotlib.pyplot as plt
-        # plt.imshow(accumulator.T)
-        # plt.show()
-
-        # TODO: vectorize
-        for best_mr, best_alpha in idxs_peaks:
-            R_model2glob = np.eye(4)
-            R_model2glob[:3, :3] = align_vectors(model.vertex_normals[best_mr], [1, 0, 0])
-            T_model2glob = R_model2glob @ tf.translation_matrix(-model.vertices[best_mr])
-
-            R_alpha = tf.rotation_matrix(alpha_step * best_alpha, [1, 0, 0], [0, 0, 0])
-            # TODO: invert homog
-            T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
-            poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
-        # break
-
-        idx_scene += 1
-        if idx_scene > 10:
-            break
+        with open(poses_path, "wb") as fh:
+            pickle.dump(poses, fh)
+    else:
+        print("Loading poses from", poses_path)
+        with open(poses_path, "rb") as fh:
+            poses = pickle.load(fh)
 
     print("Skipped", skipped_features, "features")
     # TODO: take more peaks, cluster poses
@@ -187,8 +207,8 @@ def main():
 
     # or: first cluster locations
     # then split clusters by clustering them by orientation
-    # pose_clusters = cluster_poses(poses)
-    # poses = pose_clusters
+    pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.1)
+    poses = pose_clusters
 
     cam_trafo = None
     for T_model2scene, m_r, score in poses:
@@ -284,64 +304,86 @@ def compute_ppf(
     return table, ref2feature
 
 
-def average_poses(poses):
-    Q = []
-    translations = []
-    for trafo in poses:
-        quat = tf.quaternion_from_matrix(trafo[:3,:3])
-
-        Q.append(quat)
-        translations.append(trafo[:3,3])
-    
-    Q = np.array(Q).T
-
-
 def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
-    # first, cluster by location
     rots = [T_m2s[:3, :3] for T_m2s, _, _ in poses]
     locs = [T_m2s[:3, 3] for T_m2s, _, _ in poses]
     scores = np.array([score for _, _, score in poses])
 
+    # 1) cluster by location
     dist_dists = pdist(locs)
     dist_dendro = linkage(dist_dists, "complete")
     dist_clusters = fcluster(dist_dendro, dist_max, criterion="distance")
 
-    cluster_scores = np.zeros(np.max(dist_clusters)+1)
+    # 2) split each cluster, by clustering the contents by orientation
+    # rot_dists = None # TODO
+    # rot_dendor = linkage(rot_dists, "complete")
+    # rot_clusters = fcluster(rot_dendor, np.radians(rot_max_deg), criterion="distance")
+
+    # TODO figure out how to combine both
+    # final clusters = two pts clustered together in distance AND rotation
+    # i.e. for each pt, look at cluster buddies in dist and rot
+    # if two pts are buddies in either, they form a cluster
+    # if either of them is already in a final cluster, the other is taken into that one
+
+    cluster_scores = np.zeros(np.max(dist_clusters) + 1)
     for score, cluster in zip(scores, dist_clusters):
         cluster_scores[cluster] += score
-    
+
     best_cluster = np.argmax(cluster_scores)
-    print("Best cluster", best_cluster, cluster_scores[best_cluster], np.count_nonzero(dist_clusters == best_cluster))
+    print(
+        "Best cluster",
+        best_cluster,
+        cluster_scores[best_cluster],
+        np.count_nonzero(dist_clusters == best_cluster),
+    )
 
-    out = []
+    cluster_score_thresh = np.quantile(cluster_scores, 0.99)
+    import matplotlib.pyplot as plt
+    plt.hist(cluster_scores, histtype="stepfilled", bins=100)
+    plt.title("Cluster Scores Histogram")
+    plt.show()
+
+    out_ts = defaultdict(list)
+    out_Rs = defaultdict(list)
+    num_skipped_clusters = 0
     for pose_idx, cluster_idx in enumerate(dist_clusters):
-        if cluster_idx == best_cluster:
-            out.append(poses[pose_idx])
-    print("out", out)
-    return out
+        if cluster_scores[cluster_idx] < cluster_score_thresh:
+            num_skipped_clusters += 1
+            continue
 
-    cluster2poses = defaultdict(list)
-    pose2cluster = {}
-    for idx, cluster in enumerate(dist_clusters):
-        pose2cluster[idx] = cluster
-        cluster2poses.append(idx)
-    
-    for cluster, pose_idxs in cluster2poses.items():
-        pass
+        out_ts[cluster_idx].append(locs[pose_idx])
+        out_Rs[cluster_idx].append(rots[pose_idx])
 
-    
-        
-    # Qs = defaultdict(list)
-    #     quat = tf.quaternion_from_matrix(rot)
-    #     Qs[cluster].append(quat)
-    
-    # average_rot = 
-    # for cluster, Q in Qs.items():
-    #     pass
+    print("Skipped", num_skipped_clusters, "clusters because score too low")
 
-    # then, cluster each cluster by rotation
-    for T_model2scene, m_r, score in poses:
-        pass
+    out_poses = []
+    for cluster_idx in out_ts:
+        ts = out_ts[cluster_idx]
+        Rs = out_Rs[cluster_idx]
+
+        avg_t = np.mean(ts, axis=0)
+        avg_R = average_rotations(Rs)
+        out_T = np.eye(4)
+        out_T[:3, :3] = avg_R[:3, :3]
+        out_T[:3, 3] = avg_t
+        out_poses.append((out_T, 0, None))
+    
+    print("Returning", len(out_poses), "clustered and averaged poses")
+
+    return out_poses
+
+
+def average_rotations(rotations):
+    Q = np.zeros((4, len(rotations)))
+
+    for i, rot in enumerate(rotations):
+        quat = tf.quaternion_from_matrix(rot)
+        Q[:, i] = quat
+
+    _, v = np.linalg.eigh(Q @ Q.T)
+    quat_avg = v[:, -1]
+
+    return tf.quaternion_matrix(quat_avg)
 
 
 # trimesh todo
@@ -374,21 +416,3 @@ assert np.isclose(F4, np.radians(90), rtol=1e-3)
 
 if __name__ == "__main__":
     main()
-
-
-"""
-                cam_trafo = None
-                if VIS:
-                    model_vis = model.copy()
-                    model_vis.apply_transform(T_model2scene)
-
-                    m_ref2scene = (T_model2scene @ [*m_r, 1])[:3]
-                    m_sec2scene = (T_model2scene @ [*m_i, 1])[:3]
-                    scene_pair = trimesh.PointCloud(np.linspace(s_r, s_i, 20), [0, 100, 0, 255])
-                    model_pair = trimesh.PointCloud(np.linspace(m_ref2scene, m_sec2scene, 20), [100, 0, 0, 255])
-                    vis = trimesh.Scene([model_vis, scene, scene_pair, model_pair])
-                    if cam_trafo is not None:
-                        vis.camera_transform = cam_trafo
-                    vis.show()
-                    cam_trafo = vis.camera_transform
-"""
