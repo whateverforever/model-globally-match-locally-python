@@ -9,15 +9,17 @@ import random
 import time
 import argparse
 import pickle
+import itertools
 import math
 from collections import defaultdict
 
 import trimesh
 import trimesh.transformations as tf
 import numpy as np
+import numba
 import matplotlib.pyplot as plt
 
-from scipy.spatial.distance import pdist
+from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 
 VIS = True
@@ -194,19 +196,19 @@ def main():
         with open(poses_path, "rb") as fh:
             poses = pickle.load(fh)
 
+    print(f"Got {len(poses)} poses after matching")
     print("Skipped", skipped_features, "features")
     # TODO: take more peaks, cluster poses
 
     best_score = np.max(list(zip(*poses))[2])
     print("Best score", best_score)
 
+    bad_score_thresh = np.quantile(list(zip(*poses))[2], 0.1)
+
     poses.sort(key=lambda thing: thing[2], reverse=True)
+    poses = list(filter(lambda thing: thing[2] > bad_score_thresh, poses))
+    print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
 
-    # maybe easiest to sample pts on object and cluster on location
-    # of these pts
-
-    # or: first cluster locations
-    # then split clusters by clustering them by orientation
     pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.1)
     poses = pose_clusters
 
@@ -304,9 +306,44 @@ def compute_ppf(
     return table, ref2feature
 
 
+def bernstein(vala, valb):
+    """thanks to special sauce https://stackoverflow.com/a/34006336/10059727"""
+    h = 1009
+    h = h * 9176 + vala
+    h = h * 9176 + valb
+    return h
+
+@numba.jit()
+def rotation_between(rotmatA, rotmatB):
+    # assert rotmatA.shape == (3,3)
+    # assert rotmatB.shape == (3,3)
+
+    r_oa_t = np.transpose(rotmatA)
+    r_ab = r_oa_t @ rotmatB
+    return np.arccos((np.trace(r_ab) - 1) / 2)
+
+matA = tf.rotation_matrix(np.pi/4, [1,0,0])[:3,:3]
+matB = tf.rotation_matrix(np.pi/2, [1,0,0])[:3,:3]
+assert np.isclose(rotation_between(matA, matB), np.pi/4), rotation_between(matA, matB)
+
+def pdist_rot(rot_mats):
+    """ Returns a distance matrix like pdist, but in rotation space """
+
+    # we save distance in degrees and use uint8 for smaller memory footprint
+    dists = np.zeros((len(rot_mats), len(rot_mats)), dtype=np.uint8)
+    print("dists shape", dists.shape)
+
+    mat_idxs = np.arange(len(rot_mats))
+    for idxA, idxB in itertools.combinations(mat_idxs, 2):
+        dist = np.degrees(rotation_between(rot_mats[idxA], rot_mats[idxB])).astype(np.uint8)
+        dists[idxA, idxB] = dist
+        dists[idxB, idxA] = dist
+
+    return squareform(dists).astype(float)
+
 def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
-    rots = [T_m2s[:3, :3] for T_m2s, _, _ in poses]
-    locs = [T_m2s[:3, 3] for T_m2s, _, _ in poses]
+    rots = np.array([T_m2s[:3, :3] for T_m2s, _, _ in poses])
+    locs = np.array([T_m2s[:3, 3] for T_m2s, _, _ in poses])
     scores = np.array([score for _, _, score in poses])
 
     # 1) cluster by location
@@ -315,30 +352,35 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     dist_clusters = fcluster(dist_dendro, dist_max, criterion="distance")
 
     # 2) split each cluster, by clustering the contents by orientation
-    # rot_dists = None # TODO
-    # rot_dendor = linkage(rot_dists, "complete")
-    # rot_clusters = fcluster(rot_dendor, np.radians(rot_max_deg), criterion="distance")
+    rot_dists = pdist_rot(rots)
+    rot_dendor = linkage(rot_dists, "complete")
+    rot_clusters = fcluster(rot_dendor, rot_max_deg, criterion="distance")
+    print("rot_clusters", rot_clusters)
 
-    # TODO figure out how to combine both
-    # final clusters = two pts clustered together in distance AND rotation
-    # i.e. for each pt, look at cluster buddies in dist and rot
-    # if two pts are buddies in either, they form a cluster
-    # if either of them is already in a final cluster, the other is taken into that one
+    # Combine the two clusterings, by creating new clusters
+    # if two poses are in same cluster in loc and rot, they will be in new
+    # common cluster (hash of both cluster ids)
+    pose_clusters = bernstein(dist_clusters, rot_clusters)
+    print("combined clusters", pose_clusters)
 
-    cluster_scores = np.zeros(np.max(dist_clusters) + 1)
-    for score, cluster in zip(scores, dist_clusters):
-        cluster_scores[cluster] += score
+    # remap the ludicrous hash values to range 0..num
+    _, pose_clusters = np.unique(pose_clusters, return_inverse=True)
+
+    cluster_scores = np.zeros(np.max(pose_clusters) + 1)
+    for pose_score, pose_cluster in zip(scores, pose_clusters):
+        cluster_scores[pose_cluster] += pose_score
 
     best_cluster = np.argmax(cluster_scores)
     print(
         "Best cluster",
         best_cluster,
         cluster_scores[best_cluster],
-        np.count_nonzero(dist_clusters == best_cluster),
+        np.count_nonzero(pose_clusters == best_cluster),
     )
 
     cluster_score_thresh = np.quantile(cluster_scores, 0.99)
     import matplotlib.pyplot as plt
+
     plt.hist(cluster_scores, histtype="stepfilled", bins=100)
     plt.title("Cluster Scores Histogram")
     plt.show()
@@ -346,7 +388,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     out_ts = defaultdict(list)
     out_Rs = defaultdict(list)
     num_skipped_clusters = 0
-    for pose_idx, cluster_idx in enumerate(dist_clusters):
+    for pose_idx, cluster_idx in enumerate(pose_clusters):
         if cluster_scores[cluster_idx] < cluster_score_thresh:
             num_skipped_clusters += 1
             continue
@@ -367,7 +409,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
         out_T[:3, :3] = avg_R[:3, :3]
         out_T[:3, 3] = avg_t
         out_poses.append((out_T, 0, None))
-    
+
     print("Returning", len(out_poses), "clustered and averaged poses")
 
     return out_poses
