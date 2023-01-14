@@ -16,7 +16,6 @@ from collections import defaultdict
 import trimesh
 import trimesh.transformations as tf
 import numpy as np
-import numba
 import matplotlib.pyplot as plt
 
 from scipy.spatial import KDTree
@@ -195,7 +194,7 @@ def main():
             # break
 
             idx_scene += 1
-            if idx_scene > 50:
+            if idx_scene > 100:
                 break
 
         with open(poses_path, "wb") as fh:
@@ -207,7 +206,6 @@ def main():
 
     print(f"Got {len(poses)} poses after matching")
     print("Skipped", skipped_features, "features")
-    # TODO: take more peaks, cluster poses
 
     best_score = np.max(list(zip(*poses))[2])
     print("Best score", best_score)
@@ -218,7 +216,7 @@ def main():
     poses = list(filter(lambda thing: thing[2] > bad_score_thresh, poses))
     print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
 
-    pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.1)
+    pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.5, rot_max_deg=30)
     poses = pose_clusters
 
     cam_trafo = None
@@ -316,16 +314,16 @@ def compute_ppf(
 
 
 def bernstein(vala, valb):
-    """thanks to special sauce https://stackoverflow.com/a/34006336/10059727"""
+    """ thanks to special sauce https://stackoverflow.com/a/34006336/10059727 """
     h = 1009
     h = h * 9176 + vala
     h = h * 9176 + valb
     return h
 
-@numba.jit()
 def rotation_between(rotmatA, rotmatB):
-    # assert rotmatA.shape == (3,3)
-    # assert rotmatB.shape == (3,3)
+    """ thanks to JonasVautherin https://math.stackexchange.com/q/2113634 """
+    assert rotmatA.shape == (3,3)
+    assert rotmatB.shape == (3,3)
 
     r_oa_t = np.transpose(rotmatA)
     r_ab = r_oa_t @ rotmatB
@@ -342,6 +340,7 @@ def pdist_rot(rot_mats):
     dists = np.zeros((len(rot_mats), len(rot_mats)), dtype=np.uint8)
     print("dists shape", dists.shape)
 
+    # XXX instead of distance matrix, compute condensed form to save memory
     mat_idxs = np.arange(len(rot_mats))
     for idxA, idxB in itertools.combinations(mat_idxs, 2):
         dist = np.degrees(rotation_between(rot_mats[idxA], rot_mats[idxB])).astype(np.uint8)
@@ -360,7 +359,9 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     dist_dendro = linkage(dist_dists, "complete")
     dist_clusters = fcluster(dist_dendro, dist_max, criterion="distance")
 
-    # 2) split each cluster, by clustering the contents by orientation
+    # 2) cluster by rotations
+    # XXX optimize, we can make more smaller cluster problems, since
+    # a cluster across distant poses doesn't make sense
     rot_dists = pdist_rot(rots)
     rot_dendor = linkage(rot_dists, "complete")
     rot_clusters = fcluster(rot_dendor, rot_max_deg, criterion="distance")
@@ -387,9 +388,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
         np.count_nonzero(pose_clusters == best_cluster),
     )
 
-    cluster_score_thresh = np.quantile(cluster_scores, 0.99)
     import matplotlib.pyplot as plt
-
     plt.hist(cluster_scores, histtype="stepfilled", bins=100)
     plt.title("Cluster Scores Histogram")
     plt.show()
@@ -402,6 +401,9 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
         out_Rs[cluster_idx].append(rots[pose_idx])
 
     sorted_clusters = np.argsort(cluster_scores)[::-1]
+
+    for idx_cluster, top_cluster in enumerate(sorted_clusters[:10]):
+        print(f"{idx_cluster} contains {len(out_ts[top_cluster])} poses")
 
     out_poses = []
     for cluster_idx in sorted_clusters:
@@ -421,6 +423,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
 
 
 def average_rotations(rotations):
+    """ thanks to jonathan https://stackoverflow.com/a/27410865/10059727 """
     Q = np.zeros((4, len(rotations)))
 
     for i, rot in enumerate(rotations):
