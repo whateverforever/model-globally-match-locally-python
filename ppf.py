@@ -96,7 +96,10 @@ def main():
 
     scene_tree = KDTree(scene.vertices)
 
-    poses_path = os.path.join(os.path.dirname(modelbase), f"{os.path.basename(modelbase)}_{os.path.basename(scenebase)}.poses")
+    poses_path = os.path.join(
+        os.path.dirname(modelbase),
+        f"{os.path.basename(modelbase)}_{os.path.basename(scenebase)}.poses",
+    )
     if not os.path.exists(poses_path):
         print("Couldn't find cached poses. Computing anew.")
         idx_scene = 0
@@ -108,7 +111,7 @@ def main():
 
             # one accumulator per reference vert
             accumulator = np.zeros((len(model.vertices), alpha_num))
-            
+
             # instead of going over all scene pts, just look towards points
             # that could still be on the object
             closeby = scene_tree.query_ball_point(scene.vertices[sA], model.scale)
@@ -134,7 +137,10 @@ def main():
                 T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
 
                 s_ig = (T_scene2glob @ homog(s_i))[:3]
-                alpha_s = np.arccos(np.dot(s_ig, [0, 0, -1]) / np.linalg.norm(s_ig))
+                s_ig /= np.linalg.norm(s_ig)
+                # alpha_s = np.arccos(np.dot(s_ig, [0, 0, -1]) / np.linalg.norm(s_ig))
+                alpha_s = vector_angle_signed_x(s_ig, [0, 0, -1])
+                # alpha_s = trimesh.geometry.vector_angle([(s_ig, [0,0,-1])])[0]
 
                 print(
                     "Found",
@@ -156,24 +162,27 @@ def main():
                     # TODO: precompute
                     if m_pair not in model_alphas:
                         m_ig = (T_model2glob @ homog(m_i))[:3]
-                        alpha_m = np.arccos(
-                            np.dot(m_ig, [0, 0, -1]) / np.linalg.norm(m_ig)
-                        )
+                        m_ig /= np.linalg.norm(m_ig)
+                        # alpha_m = np.arccos(
+                        #     np.dot(m_ig, [0, 0, -1]) / np.linalg.norm(m_ig)
+                        # )
+                        alpha_m = vector_angle_signed_x(m_ig, [0, 0, -1])
+                        # alpha_m = trimesh.geometry.vector_angle([(m_ig, [0,0,-1])])[0]
                         model_alphas[m_pair] = alpha_m
 
                     alpha_m = model_alphas[m_pair]
                     alpha = alpha_m - alpha_s
-                    # print("Alpha", np.degrees(alpha), "model:", np.degrees(alpha_m), "scene:", np.degrees(alpha_s))
 
                     alpha_disc = int(alpha // alpha_step)
+                    # print("Alpha", np.degrees(alpha), "model:", np.degrees(alpha_m), "scene:", np.degrees(alpha_s), "alpha disc:", alpha_disc)
                     accumulator[mA, alpha_disc] += 1
 
             # peak_cutoff = np.quantile(accumulator.reshape(-1), 0.99)
             peak_cutoff = np.max(accumulator) * 0.9
             idxs_peaks = np.argwhere(accumulator > peak_cutoff)
 
-            #np.save("accumulator.npy", accumulator)
-            #quit()
+            # np.save("accumulator_signed.npy", accumulator)
+            # quit()
 
             # import matplotlib.pyplot as plt
             # plt.imshow(accumulator.T)
@@ -196,7 +205,7 @@ def main():
                 poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
 
             idx_scene += 1
-            if idx_scene > 100:
+            if idx_scene > 50:
                 break
 
         with open(poses_path, "wb") as fh:
@@ -214,9 +223,9 @@ def main():
 
     poses.sort(key=lambda thing: thing[2], reverse=True)
 
-    bad_score_thresh = np.quantile(list(zip(*poses))[2], 0.1)
-    poses = list(filter(lambda thing: thing[2] > bad_score_thresh, poses))
-    print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
+    # bad_score_thresh = np.quantile(list(zip(*poses))[2], 0.1)
+    # poses = list(filter(lambda thing: thing[2] > bad_score_thresh, poses))
+    # print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
 
     t_cluster_start = time.perf_counter()
     pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.5, rot_max_deg=30)
@@ -228,12 +237,25 @@ def main():
     for T_model2scene, m_r, score in poses:
         model_vis = model.copy()
         model_vis.apply_transform(T_model2scene)
-        model_ref = trimesh.PointCloud([model_vis.vertices[m_r]])
-        vis = trimesh.Scene([model_vis, scene, model_ref])
+        # model_ref = trimesh.PointCloud([model_vis.vertices[m_r]])
+        scene_ref = trimesh.PointCloud(
+            [scene.vertices[idx] for idx in list(pairs_scene.keys())[:100]]
+        )
+        vis = trimesh.Scene([model_vis, scene, scene_ref])
         if cam_trafo is not None:
             vis.camera_transform = cam_trafo
         vis.show()
         cam_trafo = vis.camera_transform
+
+
+def vector_angle_signed_x(vecA, vecB):
+    assert np.isclose(np.linalg.norm(vecA), 1)
+    assert np.isclose(np.linalg.norm(vecB), 1)
+    return np.arctan2(np.dot(np.cross(vecA, vecB), [1, 0, 0]), np.dot(vecA, vecB))
+
+
+assert np.isclose(vector_angle_signed_x([0, 1, 0], [0, 0, 1]), np.pi / 2)
+assert np.isclose(vector_angle_signed_x([0, 0, 1], [0, 1, 0]), -np.pi / 2)
 
 
 def align_vectors(a, b):
@@ -319,27 +341,30 @@ def compute_ppf(
 
 
 def bernstein(vala, valb):
-    """ thanks to special sauce https://stackoverflow.com/a/34006336/10059727 """
+    """thanks to special sauce https://stackoverflow.com/a/34006336/10059727"""
     h = 1009
     h = h * 9176 + vala
     h = h * 9176 + valb
     return h
 
+
 def rotation_between(rotmatA, rotmatB):
-    """ thanks to JonasVautherin https://math.stackexchange.com/q/2113634 """
-    assert rotmatA.shape == (3,3)
-    assert rotmatB.shape == (3,3)
+    """thanks to JonasVautherin https://math.stackexchange.com/q/2113634"""
+    assert rotmatA.shape == (3, 3)
+    assert rotmatB.shape == (3, 3)
 
     r_oa_t = np.transpose(rotmatA)
     r_ab = r_oa_t @ rotmatB
     return np.arccos((np.trace(r_ab) - 1) / 2)
 
-matA = tf.rotation_matrix(np.pi/4, [1,0,0])[:3,:3]
-matB = tf.rotation_matrix(np.pi/2, [1,0,0])[:3,:3]
-assert np.isclose(rotation_between(matA, matB), np.pi/4), rotation_between(matA, matB)
+
+matA = tf.rotation_matrix(np.pi / 4, [1, 0, 0])[:3, :3]
+matB = tf.rotation_matrix(np.pi / 2, [1, 0, 0])[:3, :3]
+assert np.isclose(rotation_between(matA, matB), np.pi / 4), rotation_between(matA, matB)
+
 
 def pdist_rot(rot_mats):
-    """ Returns a distance matrix like pdist, but in rotation space """
+    """Returns a distance matrix like pdist, but in rotation space"""
 
     # we save distance in degrees and use uint8 for smaller memory footprint
     dists = np.zeros((len(rot_mats), len(rot_mats)), dtype=np.uint8)
@@ -348,11 +373,14 @@ def pdist_rot(rot_mats):
     # XXX instead of distance matrix, compute condensed form to save memory
     mat_idxs = np.arange(len(rot_mats))
     for idxA, idxB in itertools.combinations(mat_idxs, 2):
-        dist = np.degrees(rotation_between(rot_mats[idxA], rot_mats[idxB])).astype(np.uint8)
+        dist = np.degrees(rotation_between(rot_mats[idxA], rot_mats[idxB])).astype(
+            np.uint8
+        )
         dists[idxA, idxB] = dist
         dists[idxB, idxA] = dist
 
     return squareform(dists).astype(float)
+
 
 def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     rots = np.array([T_m2s[:3, :3] for T_m2s, _, _ in poses])
@@ -394,6 +422,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     )
 
     import matplotlib.pyplot as plt
+
     plt.hist(cluster_scores, histtype="stepfilled", bins=100)
     plt.title("Cluster Scores Histogram")
     plt.show()
@@ -428,7 +457,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
 
 
 def average_rotations(rotations):
-    """ thanks to jonathan https://stackoverflow.com/a/27410865/10059727 """
+    """thanks to jonathan https://stackoverflow.com/a/27410865/10059727"""
     Q = np.zeros((4, len(rotations)))
 
     for i, rot in enumerate(rotations):
