@@ -96,7 +96,7 @@ def main():
 
     scene_tree = KDTree(scene.vertices)
 
-    poses_path = f"{modelbase}_{scenebase}.poses"
+    poses_path = os.path.join(os.path.dirname(modelbase), f"{os.path.basename(modelbase)}_{os.path.basename(scenebase)}.poses")
     if not os.path.exists(poses_path):
         print("Couldn't find cached poses. Computing anew.")
         idx_scene = 0
@@ -168,14 +168,17 @@ def main():
                     alpha_disc = int(alpha // alpha_step)
                     accumulator[mA, alpha_disc] += 1
 
-            peak_cutoff = np.quantile(accumulator.reshape(-1), 0.99)
+            # peak_cutoff = np.quantile(accumulator.reshape(-1), 0.99)
+            peak_cutoff = np.max(accumulator) * 0.9
             idxs_peaks = np.argwhere(accumulator > peak_cutoff)
+
+            #np.save("accumulator.npy", accumulator)
+            #quit()
 
             # import matplotlib.pyplot as plt
             # plt.imshow(accumulator.T)
             # plt.show()
 
-            # TODO: vectorize
             for best_mr, best_alpha in idxs_peaks:
                 R_model2glob = np.eye(4)
                 R_model2glob[:3, :3] = align_vectors(
@@ -191,7 +194,6 @@ def main():
                 # TODO: invert homog
                 T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
                 poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
-            # break
 
             idx_scene += 1
             if idx_scene > 100:
@@ -210,14 +212,17 @@ def main():
     best_score = np.max(list(zip(*poses))[2])
     print("Best score", best_score)
 
-    bad_score_thresh = np.quantile(list(zip(*poses))[2], 0.1)
-
     poses.sort(key=lambda thing: thing[2], reverse=True)
+
+    bad_score_thresh = np.quantile(list(zip(*poses))[2], 0.1)
     poses = list(filter(lambda thing: thing[2] > bad_score_thresh, poses))
     print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
 
+    t_cluster_start = time.perf_counter()
     pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.5, rot_max_deg=30)
     poses = pose_clusters
+    t_cluster_end = time.perf_counter()
+    print(f"Clustering took {t_cluster_end - t_cluster_start:.1f}s")
 
     cam_trafo = None
     for T_model2scene, m_r, score in poses:
