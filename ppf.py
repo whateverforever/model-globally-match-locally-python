@@ -2,6 +2,9 @@
 """
 This script computes the point-pair features of a given
 model and tries to find the model in a given scene.
+
+Note: Currently, trimesh doesn't support pointcloud with normals. To combat this, you need to
+      reconstruct some surface between the points (e.g. ball pivoting)
 """
 
 import os
@@ -26,17 +29,48 @@ VIS = True
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("model", help="Path to the model pointcloud")
     parser.add_argument("scene", help="Path to the scene pointcloud")
-    # parser.add_argument("scene_vis", help="Path to a version of the scene that is better for visualization")
+    parser.add_argument(
+        "--scene-pts-fraction",
+        default=0.2,
+        type=float,
+        help="Fraction of scene points to use as reference",
+    )
+    parser.add_argument(
+        "--scene-pts-abs",
+        type=float,
+        help="Max absolute number of scene pts. Between fraction and abs, smaller value is taken.",
+    )
+    parser.add_argument(
+        "--cluster-max-angle",
+        type=float,
+        default=30,
+        help="Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]"
+    )
     args = parser.parse_args()
 
-    model: trimesh.Trimesh = trimesh.load(args.model)
-    scene: trimesh.Trimesh = trimesh.load(args.scene)
+    model = trimesh.load(args.model)
+    scene = trimesh.load(args.scene)
 
-    model.visual.vertex_colors = [[255, 0, 0, 128] for _ in model.vertices]
-    scene.visual.vertex_colors = [[0, 255, 0, 255] for _ in model.vertices]
+    assert hasattr(
+        model, "vertex_normals"
+    ), "model has no vertex normals (might be trimesh loading bug)"
+    assert hasattr(
+        scene, "vertex_normals"
+    ), "scene has no vertex normals (might be trimesh loading bug)"
+
+    # if no abs number given, use all scene verts
+    args.scene_pts_abs = args.scene_pts_abs or len(scene.vertices)
+
+    print("Model has", len(model.vertices), "vertices")
+    print("Scene has", len(scene.vertices), "vertices")
+
+    model.visual.vertex_colors = [[255, 0, 0, 255] for _ in model.vertices]
+    scene.visual.vertex_colors = [[150, 200, 150, 240] for _ in scene.vertices]
 
     if VIS:
         vis = trimesh.Scene([model, scene])
@@ -48,13 +82,11 @@ def main():
     dist_step = 0.05 * model.scale
 
     modelbase, _ = os.path.splitext(args.model)
-    model_ppf_path = f"{modelbase}.ppf"
+    model_ppf_path = f"{modelbase}.model.ppf"
     if not os.path.exists(model_ppf_path):
         print("Computing model ppfs features")
         t_start = time.perf_counter()
-
         ppfs_model, pairs_model = compute_ppf(model, angle_step, dist_step)
-
         t_end = time.perf_counter()
         print(
             f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s"
@@ -69,11 +101,18 @@ def main():
 
     # 2. choose reference points in scene, compute their ppfs
     scenebase, _ = os.path.splitext(args.scene)
-    scene_ppf_path = f"{scenebase}.ppf"
+    scene_ppf_path = f"{scenebase}.scene.ppf"
     if not os.path.exists(scene_ppf_path):
         print("Computing scene ppfs features")
         t_start = time.perf_counter()
-        ppfs_scene, pairs_scene = compute_ppf(scene, angle_step, dist_step, 1 / 5)
+        ppfs_scene, pairs_scene = compute_ppf(
+            scene,
+            angle_step,
+            dist_step,
+            args.scene_pts_fraction,
+            args.scene_pts_abs,
+            model.scale/2,
+        )
         t_end = time.perf_counter()
         print(f"Computing ppfs for the scene took {t_end - t_start:.2f}s")
 
@@ -102,22 +141,25 @@ def main():
     )
     if not os.path.exists(poses_path):
         print("Couldn't find cached poses. Computing anew.")
-        idx_scene = 0
         poses = []
+        # one accumulator per reference vert
+        accumulator = np.zeros((len(model.vertices), alpha_num))
 
         print("Num reference verts", len(pairs_scene))
-        for sA in pairs_scene:
-            print(f"{len(pairs_scene[sA])} paired verts for ref {sA}", " " * 20)
+        for idx_ref, sA in enumerate(pairs_scene):
+            print(f"{idx_ref+1}/{len(pairs_scene)}: {len(pairs_scene[sA])} paired verts for ref {sA}", " " * 20)
 
-            # one accumulator per reference vert
-            accumulator = np.zeros((len(model.vertices), alpha_num))
+            # one accumulator per reference vert, we set it to zero instead of re-initializing
+            accumulator[...] = 0
 
-            # instead of going over all scene pts, just look towards points
-            # that could still be on the object
-            closeby = scene_tree.query_ball_point(scene.vertices[sA], model.scale)
-            print("closeby", len(closeby))
+            s_r = scene.vertices[sA]
+            s_normal = scene.vertex_normals[sA]
 
-            for sB in closeby:
+            R_scene2glob = np.eye(4)
+            R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
+            T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
+
+            for sB in pairs_scene[sA]:
                 if sA == sB:
                     continue
 
@@ -127,47 +169,33 @@ def main():
                     skipped_features += 1
                     continue
 
-                # print(s_feature, s_pairs)
-                s_r = scene.vertices[sA]
                 s_i = scene.vertices[sB]
-                s_normal = scene.vertex_normals[sA]
-
-                R_scene2glob = np.eye(4)
-                R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
-                T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
-
                 s_ig = (T_scene2glob @ homog(s_i))[:3]
                 s_ig /= np.linalg.norm(s_ig)
-                # alpha_s = np.arccos(np.dot(s_ig, [0, 0, -1]) / np.linalg.norm(s_ig))
                 alpha_s = vector_angle_signed_x(s_ig, [0, 0, -1])
-                # alpha_s = trimesh.geometry.vector_angle([(s_ig, [0,0,-1])])[0]
 
-                print(
-                    "Found",
-                    len(ppfs_model[s_feature]),
-                    "matching pairs in model",
-                    " " * 20,
-                    end="\r",
-                )
+                # print(
+                #     "Found",
+                #     len(ppfs_model[s_feature]),
+                #     "matching pairs in model",
+                #     " " * 20,
+                #     end="\r",
+                # )
                 for m_pair in ppfs_model[s_feature]:
-                    mA, mB = m_pair
-                    m_r = model.vertices[mA]
-                    m_i = model.vertices[mB]
-                    m_normal = model.vertex_normals[mA]
-
-                    R_model2glob = np.eye(4)
-                    R_model2glob[:3, :3] = align_vectors(m_normal, [1, 0, 0])
-                    T_model2glob = R_model2glob @ tf.translation_matrix(-m_r)
-
                     # TODO: precompute
                     if m_pair not in model_alphas:
+                        mA, mB = m_pair
+                        m_r = model.vertices[mA]
+                        m_i = model.vertices[mB]
+                        m_normal = model.vertex_normals[mA]
+
+                        R_model2glob = np.eye(4)
+                        R_model2glob[:3, :3] = align_vectors(m_normal, [1, 0, 0])
+                        T_model2glob = R_model2glob @ tf.translation_matrix(-m_r)
+                    
                         m_ig = (T_model2glob @ homog(m_i))[:3]
                         m_ig /= np.linalg.norm(m_ig)
-                        # alpha_m = np.arccos(
-                        #     np.dot(m_ig, [0, 0, -1]) / np.linalg.norm(m_ig)
-                        # )
                         alpha_m = vector_angle_signed_x(m_ig, [0, 0, -1])
-                        # alpha_m = trimesh.geometry.vector_angle([(m_ig, [0,0,-1])])[0]
                         model_alphas[m_pair] = alpha_m
 
                     alpha_m = model_alphas[m_pair]
@@ -180,13 +208,6 @@ def main():
             # peak_cutoff = np.quantile(accumulator.reshape(-1), 0.99)
             peak_cutoff = np.max(accumulator) * 0.9
             idxs_peaks = np.argwhere(accumulator > peak_cutoff)
-
-            # np.save("accumulator_signed.npy", accumulator)
-            # quit()
-
-            # import matplotlib.pyplot as plt
-            # plt.imshow(accumulator.T)
-            # plt.show()
 
             for best_mr, best_alpha in idxs_peaks:
                 R_model2glob = np.eye(4)
@@ -204,10 +225,6 @@ def main():
                 T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
                 poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
 
-            idx_scene += 1
-            if idx_scene > 50:
-                break
-
         with open(poses_path, "wb") as fh:
             pickle.dump(poses, fh)
     else:
@@ -223,29 +240,38 @@ def main():
 
     poses.sort(key=lambda thing: thing[2], reverse=True)
 
-    # bad_score_thresh = np.quantile(list(zip(*poses))[2], 0.1)
-    # poses = list(filter(lambda thing: thing[2] > bad_score_thresh, poses))
-    # print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
+    bad_score_thresh = np.quantile(list(zip(*poses))[2], 0.1)
+    poses = list(filter(lambda thing: thing[2] > bad_score_thresh, poses))
+    print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
 
     t_cluster_start = time.perf_counter()
-    pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.5, rot_max_deg=30)
+    pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.5, rot_max_deg=args.cluster_max_angle)
     poses = pose_clusters
     t_cluster_end = time.perf_counter()
     print(f"Clustering took {t_cluster_end - t_cluster_start:.1f}s")
 
-    cam_trafo = None
+    # cam_trafo = None
+    # for T_model2scene, m_r, score in poses:
+    #     model_vis = model.copy()
+    #     model_vis.apply_transform(T_model2scene)
+    #     # model_ref = trimesh.PointCloud([model_vis.vertices[m_r]])
+    #     scene_ref = trimesh.PointCloud(
+    #         [scene.vertices[idx] for idx in list(pairs_scene.keys())[:100]]
+    #     )
+    #     vis = trimesh.Scene([model_vis, scene, scene_ref])
+    #     if cam_trafo is not None:
+    #         vis.camera_transform = cam_trafo
+    #     vis.show()
+    #     cam_trafo = vis.camera_transform
+    scene_refs = trimesh.PointCloud(
+        [scene.vertices[idx] for idx in list(pairs_scene.keys())[:100]]
+    )
+    vis = trimesh.Scene([scene, scene_refs])
     for T_model2scene, m_r, score in poses:
         model_vis = model.copy()
         model_vis.apply_transform(T_model2scene)
-        # model_ref = trimesh.PointCloud([model_vis.vertices[m_r]])
-        scene_ref = trimesh.PointCloud(
-            [scene.vertices[idx] for idx in list(pairs_scene.keys())[:100]]
-        )
-        vis = trimesh.Scene([model_vis, scene, scene_ref])
-        if cam_trafo is not None:
-            vis.camera_transform = cam_trafo
-        vis.show()
-        cam_trafo = vis.camera_transform
+        vis.add_geometry(model_vis)
+    vis.show()
 
 
 def vector_angle_signed_x(vecA, vecB):
@@ -271,7 +297,7 @@ def align_vectors(a, b):
 
     Vmat = np.array([[0, -v3, v2], [v3, 0, -v1], [-v2, v1, 0]])
 
-    R = np.eye(3, dtype=np.float64) + Vmat + (Vmat.dot(Vmat) * h)
+    R = np.eye(3) + Vmat + (Vmat.dot(Vmat) * h)
     return R
 
 
@@ -305,28 +331,40 @@ def compute_feature(vertA, vertB, normA, normB, angle_step=None, dist_step=None)
 
 
 def compute_ppf(
-    mesh: trimesh.Trimesh, angle_step: float, dist_step: float, fraction_pts=1.0
+    mesh: trimesh.Trimesh,
+    angle_step: float,
+    dist_step: float,
+    ref_fraction=1.0,
+    ref_abs=None,
+    max_dist=np.inf,
 ):
     table = defaultdict(list)
     ref2feature = defaultdict(dict)
 
     idxs = range(len(mesh.vertices))
 
-    num_pts = int(fraction_pts * len(mesh.vertices))
+    num_pts = int(ref_fraction * len(mesh.vertices))
+    num_pts = min(num_pts, ref_abs or len(mesh.vertices))
     idxsA = random.sample(idxs, k=num_pts)
+    print(
+        f"Going for {num_pts} reference pts ({num_pts/len(mesh.vertices) * 100:.0f}%)"
+    )
+
+    # without KDTREE: Computing ppfs for the scene took 2134.7s
+    # with KDTree:                                       814.9s
+    vert_tree = KDTree(mesh.vertices)
 
     num = 0
     for ivertA in idxsA:
-        for ivertB, vertB in enumerate(mesh.vertices):
+        vertA = mesh.vertices[ivertA]
+
+        for ivertB in vert_tree.query_ball_point(vertA, max_dist):
             if ivertA == ivertB:
                 continue
-            num += 1
-            if num < 500 or num % 10000 == 0:
-                print(num, end="\r")
 
-            vertA = mesh.vertices[ivertA]
             normA = mesh.vertex_normals[ivertA]
             normB = mesh.vertex_normals[ivertB]
+            vertB = mesh.vertices[ivertB]
 
             F = compute_feature(
                 vertA, vertB, normA, normB, angle_step=angle_step, dist_step=dist_step
@@ -334,6 +372,10 @@ def compute_ppf(
 
             if F is None:
                 continue
+
+            num += 1
+            if num < 500 or num % 10000 == 0:
+                print("pair", num, end="\r")
 
             table[F].append((ivertA, ivertB))
             ref2feature[ivertA][ivertB] = F
@@ -398,13 +440,11 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     rot_dists = pdist_rot(rots)
     rot_dendor = linkage(rot_dists, "complete")
     rot_clusters = fcluster(rot_dendor, rot_max_deg, criterion="distance")
-    print("rot_clusters", rot_clusters)
 
     # Combine the two clusterings, by creating new clusters
     # if two poses are in same cluster in loc and rot, they will be in new
     # common cluster (hash of both cluster ids)
     pose_clusters = bernstein(dist_clusters, rot_clusters)
-    print("combined clusters", pose_clusters)
 
     # remap the ludicrous hash values to range 0..num
     _, pose_clusters = np.unique(pose_clusters, return_inverse=True)
@@ -422,7 +462,6 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     )
 
     import matplotlib.pyplot as plt
-
     plt.hist(cluster_scores, histtype="stepfilled", bins=100)
     plt.title("Cluster Scores Histogram")
     plt.show()
@@ -439,8 +478,16 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     for idx_cluster, top_cluster in enumerate(sorted_clusters[:10]):
         print(f"{idx_cluster} contains {len(out_ts[top_cluster])} poses")
 
+    
+    best_score = np.max(cluster_scores)
+    best_rel_thresh = 0.5
+
     out_poses = []
     for cluster_idx in sorted_clusters:
+        if cluster_scores[cluster_idx] < best_rel_thresh * best_score:
+            continue
+
+        print("cluster idx", cluster_idx, cluster_scores[cluster_idx])
         ts = out_ts[cluster_idx]
         Rs = out_Rs[cluster_idx]
 
@@ -449,7 +496,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
         out_T = np.eye(4)
         out_T[:3, :3] = avg_R[:3, :3]
         out_T[:3, 3] = avg_t
-        out_poses.append((out_T, 0, None))
+        out_poses.append((out_T, 0, cluster_scores[cluster_idx]))
 
     print("Returning", len(out_poses), "clustered and averaged poses")
 
