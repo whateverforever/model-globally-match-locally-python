@@ -26,6 +26,7 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 
 VIS = True
+CACHING = False
 
 
 def main():
@@ -83,7 +84,11 @@ def main():
 
     modelbase, _ = os.path.splitext(args.model)
     model_ppf_path = f"{modelbase}.model.ppf"
-    if not os.path.exists(model_ppf_path):
+    if CACHING and os.path.exists(model_ppf_path):
+        print("Loading model features from", model_ppf_path)
+        with open(model_ppf_path, "rb") as fh:
+            ppfs_model, pairs_model = pickle.load(fh)
+    else:
         print("Computing model ppfs features")
         t_start = time.perf_counter()
         ppfs_model, pairs_model = compute_ppf(model, angle_step, dist_step)
@@ -94,15 +99,16 @@ def main():
 
         with open(model_ppf_path, "wb") as fh:
             pickle.dump((ppfs_model, pairs_model), fh)
-    else:
-        print("Loading model features from", model_ppf_path)
-        with open(model_ppf_path, "rb") as fh:
-            ppfs_model, pairs_model = pickle.load(fh)
+        
 
     # 2. choose reference points in scene, compute their ppfs
     scenebase, _ = os.path.splitext(args.scene)
     scene_ppf_path = f"{scenebase}.scene.ppf"
-    if not os.path.exists(scene_ppf_path):
+    if CACHING and os.path.exists(scene_ppf_path):
+        print("Loading scene features from", scene_ppf_path)
+        with open(scene_ppf_path, "rb") as fh:
+            ppfs_scene, pairs_scene = pickle.load(fh)
+    else:
         print("Computing scene ppfs features")
         t_start = time.perf_counter()
         ppfs_scene, pairs_scene = compute_ppf(
@@ -118,10 +124,6 @@ def main():
 
         with open(scene_ppf_path, "wb") as fh:
             pickle.dump((ppfs_scene, pairs_scene), fh)
-    else:
-        print("Loading scene features from", scene_ppf_path)
-        with open(scene_ppf_path, "rb") as fh:
-            ppfs_scene, pairs_scene = pickle.load(fh)
 
     homog = lambda x: [*x, 1]
 
@@ -139,7 +141,11 @@ def main():
         os.path.dirname(modelbase),
         f"{os.path.basename(modelbase)}_{os.path.basename(scenebase)}.poses",
     )
-    if not os.path.exists(poses_path):
+    if CACHING and os.path.exists(poses_path):
+        print("Loading poses from", poses_path)
+        with open(poses_path, "rb") as fh:
+            poses = pickle.load(fh)
+    else:
         print("Couldn't find cached poses. Computing anew.")
         poses = []
         # one accumulator per reference vert
@@ -227,10 +233,7 @@ def main():
 
         with open(poses_path, "wb") as fh:
             pickle.dump(poses, fh)
-    else:
-        print("Loading poses from", poses_path)
-        with open(poses_path, "rb") as fh:
-            poses = pickle.load(fh)
+        
 
     print(f"Got {len(poses)} poses after matching")
     print("Skipped", skipped_features, "features")
