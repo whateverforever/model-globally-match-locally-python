@@ -1,0 +1,8 @@
+.cache
+.DS_Store
+.vscode
+__pycache__
+build
+*.ppf
+*.poses
+*.npy
