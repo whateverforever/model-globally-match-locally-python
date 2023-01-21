@@ -46,3 +46,30 @@ def test_compute_feature():
         print("Fcpp", Fcpp)
 
         assert np.allclose(Fcpp, Fpy)
+
+def test_compute_ppf():
+    mesh = trimesh.load("./example_models/model_small.ply")
+    step_rad = 0.1
+    step_dist = 0.1
+
+    _, pairs_model_py, _ = ppf.compute_ppf(
+        mesh, step_rad, step_dist, alphas=False
+    )
+
+    # Current bug in nanobind: Doesn't recognize write protected arrays
+    F_verts = np.asfortranarray(mesh.vertices)
+    F_verts.setflags(write=True)
+    F_norms = np.asfortranarray(mesh.vertex_normals)
+    F_norms.setflags(write=True)
+
+    pairs_model_cpp = ppf_fast.compute_ppf(
+        F_verts, F_norms, step_rad, step_dist
+    )
+
+    for key in pairs_model_cpp:
+        pypair = pairs_model_py[key[0]][key[1]]
+        if pypair is None:
+            continue
+        
+        # Allow result to be off by one bin in any of the features
+        assert np.sum(np.subtract(pypair, pairs_model_cpp[key])) <= 1
