@@ -87,11 +87,11 @@ def main():
     if CACHING and os.path.exists(model_ppf_path):
         print("Loading model features from", model_ppf_path)
         with open(model_ppf_path, "rb") as fh:
-            ppfs_model, pairs_model = pickle.load(fh)
+            ppfs_model, pairs_model, model_alphas = pickle.load(fh)
     else:
         print("Computing model ppfs features")
         t_start = time.perf_counter()
-        ppfs_model, pairs_model = compute_ppf(model, angle_step, dist_step)
+        ppfs_model, pairs_model, model_alphas = compute_ppf(model, angle_step, dist_step, alphas=True)
         t_end = time.perf_counter()
         print(
             f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s"
@@ -99,7 +99,6 @@ def main():
 
         with open(model_ppf_path, "wb") as fh:
             pickle.dump((ppfs_model, pairs_model), fh)
-        
 
     # 2. choose reference points in scene, compute their ppfs
     scenebase, _ = os.path.splitext(args.scene)
@@ -107,11 +106,11 @@ def main():
     if CACHING and os.path.exists(scene_ppf_path):
         print("Loading scene features from", scene_ppf_path)
         with open(scene_ppf_path, "rb") as fh:
-            ppfs_scene, pairs_scene = pickle.load(fh)
+            _, pairs_scene, _ = pickle.load(fh)
     else:
         print("Computing scene ppfs features")
         t_start = time.perf_counter()
-        ppfs_scene, pairs_scene = compute_ppf(
+        _, pairs_scene, _ = compute_ppf(
             scene,
             angle_step,
             dist_step,
@@ -123,17 +122,15 @@ def main():
         print(f"Computing ppfs for the scene took {t_end - t_start:.2f}s")
 
         with open(scene_ppf_path, "wb") as fh:
-            pickle.dump((ppfs_scene, pairs_scene), fh)
-
-    homog = lambda x: [*x, 1]
+            pickle.dump((None, pairs_scene, None), fh)
 
     # 3. go through scene ppfs, look up in table if we find model ppf
     skipped_features = 0
-    model_alphas = {}
+
     # discretization for the alpha rotation
     alpha_num = 30
-    assert 360 % alpha_num == 0
     alpha_step = np.radians(360 / alpha_num)
+    assert 360 % alpha_num == 0
 
     scene_tree = KDTree(scene.vertices)
 
@@ -188,22 +185,7 @@ def main():
                 #     end="\r",
                 # )
                 for m_pair in ppfs_model[s_feature]:
-                    # TODO: precompute
-                    if m_pair not in model_alphas:
-                        mA, mB = m_pair
-                        m_r = model.vertices[mA]
-                        m_i = model.vertices[mB]
-                        m_normal = model.vertex_normals[mA]
-
-                        R_model2glob = np.eye(4)
-                        R_model2glob[:3, :3] = align_vectors(m_normal, [1, 0, 0])
-                        T_model2glob = R_model2glob @ tf.translation_matrix(-m_r)
-                    
-                        m_ig = (T_model2glob @ homog(m_i))[:3]
-                        m_ig /= np.linalg.norm(m_ig)
-                        alpha_m = vector_angle_signed_x(m_ig, [0, 0, -1])
-                        model_alphas[m_pair] = alpha_m
-
+                    mA, mB = m_pair
                     alpha_m = model_alphas[m_pair]
                     alpha = alpha_m - alpha_s
 
@@ -253,19 +235,6 @@ def main():
     t_cluster_end = time.perf_counter()
     print(f"Clustering took {t_cluster_end - t_cluster_start:.1f}s")
 
-    # cam_trafo = None
-    # for T_model2scene, m_r, score in poses:
-    #     model_vis = model.copy()
-    #     model_vis.apply_transform(T_model2scene)
-    #     # model_ref = trimesh.PointCloud([model_vis.vertices[m_r]])
-    #     scene_ref = trimesh.PointCloud(
-    #         [scene.vertices[idx] for idx in list(pairs_scene.keys())[:100]]
-    #     )
-    #     vis = trimesh.Scene([model_vis, scene, scene_ref])
-    #     if cam_trafo is not None:
-    #         vis.camera_transform = cam_trafo
-    #     vis.show()
-    #     cam_trafo = vis.camera_transform
     scene_refs = trimesh.PointCloud(
         [scene.vertices[idx] for idx in list(pairs_scene.keys())[:100]]
     )
@@ -332,6 +301,8 @@ def compute_feature(vertA, vertB, normA, normB, angle_step=None, dist_step=None)
 
     return (F1, F2, F3, F4)
 
+def homog(vec3):
+    return [*vec3, 1]
 
 def compute_ppf(
     mesh: trimesh.Trimesh,
@@ -340,9 +311,11 @@ def compute_ppf(
     ref_fraction=1.0,
     ref_abs=None,
     max_dist=np.inf,
+    alphas=False
 ):
     table = defaultdict(list)
     ref2feature = defaultdict(dict)
+    model_alphas = {}
 
     idxs = range(len(mesh.vertices))
 
@@ -378,11 +351,27 @@ def compute_ppf(
 
             num += 1
             if num < 500 or num % 10000 == 0:
-                print("pair", num, end="\r")
+                print("pair", num, f"{num/(len(mesh.vertices)**2)*100:.0f}%", end="\r")
 
             table[F].append((ivertA, ivertB))
             ref2feature[ivertA][ivertB] = F
-    return table, ref2feature
+
+            # precompute the model angles
+            if alphas:
+                m_r = vertA
+                m_i = vertB
+                m_normal = normA
+
+                R_model2glob = np.eye(4)
+                R_model2glob[:3, :3] = align_vectors(m_normal, [1, 0, 0])
+                T_model2glob = R_model2glob @ tf.translation_matrix(-m_r)
+            
+                m_ig = (T_model2glob @ homog(m_i))[:3]
+                m_ig /= np.linalg.norm(m_ig)
+                alpha_m = vector_angle_signed_x(m_ig, [0, 0, -1])
+                model_alphas[(ivertA, ivertB)] = alpha_m
+
+    return table, ref2feature, model_alphas
 
 
 def bernstein(vala, valb):
