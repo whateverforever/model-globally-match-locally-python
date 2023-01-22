@@ -44,6 +44,24 @@ def main():
         help="Fraction of scene points to use as reference",
     )
     parser.add_argument(
+        "--ppf-num-angles",
+        default=30,
+        type=int,
+        help="Number of angle steps used to discretize feature angles.",
+    )
+    parser.add_argument(
+        "--ppf-rel-dist-step",
+        default=0.05,
+        type=float,
+        help="Discretization step of feature distances.",
+    )
+    parser.add_argument(
+        "--alpha-num-angles",
+        default=30,
+        type=int,
+        help="Number of angle steps used to discretize the rotation angle alpha."
+    )
+    parser.add_argument(
         "--cluster-max-angle",
         type=float,
         default=30,
@@ -71,32 +89,17 @@ def main():
         vis = trimesh.Scene([model, scene])
         vis.show()
 
-    # 1. compute ppfs of all vertex pairs in model, store in hash table
-    angle_num = 30
-    angle_step = float(np.radians(360 / angle_num))
-    dist_step = 0.05 * model.scale
+    ## 1. compute ppfs of all vertex pairs in model, store in hash table
+    angle_step = float(np.radians(360 / args.ppf_num_angles))
+    dist_step = args.ppf_rel_dist_step * model.scale
 
-    modelbase, _ = os.path.splitext(args.model)
-    model_ppf_path = f"{modelbase}.model.ppf"
-    if CACHING and os.path.exists(model_ppf_path):
-        print("Loading model features from", model_ppf_path)
-        with open(model_ppf_path, "rb") as fh:
-            ppfs_model, pairs_model, model_alphas = pickle.load(fh)
-    else:
-        print("Computing model ppfs features")
-        t_start = time.perf_counter()
-        ppfs_model, pairs_model, model_alphas = compute_ppf(
-            model, angle_step, dist_step, alphas=True
-        )
-        t_end = time.perf_counter()
-        print(
-            f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s"
-        )
+    print("Computing model ppfs features")
+    t_start = time.perf_counter()
+    ppfs_model, _, model_alphas = compute_ppf(model, angle_step, dist_step, alphas=True)
+    t_end = time.perf_counter()
+    print(f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s")
 
-        with open(model_ppf_path, "wb") as fh:
-            pickle.dump((ppfs_model, pairs_model, model_alphas), fh)
-
-    # 2. choose reference points in scene, compute their ppfs
+    ## 2. choose reference points in scene, compute their ppfs
     # current bug in nanobind: arrays need to be writable to be recognized
     F_vertices = np.asfortranarray(scene.vertices)
     F_vertices.setflags(write=True)
@@ -116,97 +119,72 @@ def main():
     t_end = time.perf_counter()
     print(f"Computing all scene ppfs took {t_end - t_start:.1f}s")
 
-    # 3. go through scene ppfs, look up in table if we find model ppf
+    ## 3. go through scene ppfs, look up in table if we find model ppf
     skipped_features = 0
 
     # discretization for the alpha rotation
-    alpha_num = 30
-    alpha_step = np.radians(360 / alpha_num)
-    assert 360 % alpha_num == 0
+    alpha_step = np.radians(360 / args.alpha_num_angles)
 
-    scenebase = os.path.dirname(args.scene)
-    poses_path = os.path.join(
-        os.path.dirname(modelbase),
-        f"{os.path.basename(modelbase)}_{os.path.basename(scenebase)}.poses",
-    )
-    if CACHING and os.path.exists(poses_path):
-        print("Loading poses from", poses_path)
-        with open(poses_path, "rb") as fh:
-            poses = pickle.load(fh)
-    else:
-        print("Couldn't find cached poses. Computing anew.")
-        poses = []
-        # one accumulator per reference vert
-        accumulator = np.zeros((len(model.vertices), alpha_num))
+    poses = []
+    # accumulator we're going to reuse for each reference vert
+    accumulator = np.zeros((len(model.vertices), args.alpha_num_angles))
 
-        print("Num reference verts", len(pairs_scene))
-        for idx_ref, sA in enumerate(pairs_scene):
-            print(
-                f"{idx_ref+1}/{len(pairs_scene)}: {len(pairs_scene[sA])} paired verts for ref {sA}",
-                " " * 20,
-                end="\r",
+    print("Num reference verts", len(pairs_scene))
+    for idx_ref, sA in enumerate(pairs_scene):
+        print(
+            f"{idx_ref+1}/{len(pairs_scene)}: {len(pairs_scene[sA])} paired verts for ref {sA}",
+            " " * 20,
+            end="\r",
+        )
+
+        # one accumulator per reference vert, we set it to zero instead of re-initializing
+        accumulator[...] = 0
+
+        for sB in pairs_scene[sA]:
+            if sA == sB:
+                continue
+
+            s_feature = pairs_scene[sA][sB]
+            if s_feature not in ppfs_model:
+                skipped_features += 1
+                continue
+
+            alpha_s = scene_alphas[(sA, sB)]
+
+            for m_pair in ppfs_model[s_feature]:
+                mA, mB = m_pair
+                alpha_m = model_alphas[m_pair]
+                alpha = alpha_m - alpha_s
+
+                alpha_disc = int(alpha // alpha_step)
+                accumulator[mA, alpha_disc] += 1
+
+        peak_cutoff = np.max(accumulator) * 0.9
+        idxs_peaks = np.argwhere(accumulator > peak_cutoff)
+
+        s_r = scene.vertices[sA]
+        s_normal = scene.vertex_normals[sA]
+
+        R_scene2glob = np.eye(4)
+        R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
+        T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
+
+        for best_mr, best_alpha in idxs_peaks:
+            R_model2glob = np.eye(4)
+            R_model2glob[:3, :3] = align_vectors(
+                model.vertex_normals[best_mr], [1, 0, 0]
+            )
+            T_model2glob = R_model2glob @ tf.translation_matrix(
+                -model.vertices[best_mr]
             )
 
-            # one accumulator per reference vert, we set it to zero instead of re-initializing
-            accumulator[...] = 0
+            R_alpha = tf.rotation_matrix(alpha_step * best_alpha, [1, 0, 0], [0, 0, 0])
+            # TODO: invert homog
+            T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
+            poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
 
-            for sB in pairs_scene[sA]:
-                if sA == sB:
-                    continue
-
-                s_feature = pairs_scene[sA][sB]
-
-                if s_feature not in ppfs_model:
-                    skipped_features += 1
-                    continue
-
-                alpha_s = scene_alphas[(sA, sB)]
-
-                for m_pair in ppfs_model[s_feature]:
-                    mA, mB = m_pair
-                    alpha_m = model_alphas[m_pair]
-                    alpha = alpha_m - alpha_s
-
-                    alpha_disc = int(alpha // alpha_step)
-                    accumulator[mA, alpha_disc] += 1
-
-            # peak_cutoff = np.quantile(accumulator.reshape(-1), 0.99)
-            peak_cutoff = np.max(accumulator) * 0.9
-            idxs_peaks = np.argwhere(accumulator > peak_cutoff)
-
-            s_r = scene.vertices[sA]
-            s_normal = scene.vertex_normals[sA]
-
-            R_scene2glob = np.eye(4)
-            R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
-            T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
-
-            for best_mr, best_alpha in idxs_peaks:
-                R_model2glob = np.eye(4)
-                R_model2glob[:3, :3] = align_vectors(
-                    model.vertex_normals[best_mr], [1, 0, 0]
-                )
-                T_model2glob = R_model2glob @ tf.translation_matrix(
-                    -model.vertices[best_mr]
-                )
-
-                R_alpha = tf.rotation_matrix(
-                    alpha_step * best_alpha, [1, 0, 0], [0, 0, 0]
-                )
-                # TODO: invert homog
-                T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
-                poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
-
-        with open(poses_path, "wb") as fh:
-            pickle.dump(poses, fh)
-
-    print(f"Got {len(poses)} poses after matching")
-    print("Skipped", skipped_features, "features")
-
-    best_score = np.max(list(zip(*poses))[2])
-    print("Best score", best_score)
-
-    poses.sort(key=lambda thing: thing[2], reverse=True)
+    print(f"Got {len(poses)} poses after matching", " " * 20)
+    print("Skipped", skipped_features, "scene pairs, not found in model")
 
     t_cluster_start = time.perf_counter()
     pose_clusters = cluster_poses(
@@ -216,14 +194,20 @@ def main():
     t_cluster_end = time.perf_counter()
     print(f"Clustering took {t_cluster_end - t_cluster_start:.1f}s")
 
+    ## Visualize result
     scene_refs = trimesh.PointCloud(
-        [scene.vertices[idx] for idx in list(pairs_scene.keys())[:100]]
+        [scene.vertices[idx] for idx in list(pairs_scene.keys())]
     )
     vis = trimesh.Scene([scene, scene_refs])
     for T_model2scene, m_r, score in poses:
         model_vis = model.copy()
         model_vis.apply_transform(T_model2scene)
         vis.add_geometry(model_vis)
+
+        print("Score", score)
+        print(np.around(T_model2scene, decimals=2))
+        print()
+
     vis.show()
 
 
@@ -407,16 +391,19 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     locs = np.array([T_m2s[:3, 3] for T_m2s, _, _ in poses])
     scores = np.array([score for _, _, score in poses])
 
+    method = "average"
+    method = "complete"
+
     # 1) cluster by location
     dist_dists = pdist(locs)
-    dist_dendro = linkage(dist_dists, "complete")
+    dist_dendro = linkage(dist_dists, method)
     dist_clusters = fcluster(dist_dendro, dist_max, criterion="distance")
 
     # 2) cluster by rotations
     # XXX optimize, we can make more smaller cluster problems, since
     # a cluster across distant poses doesn't make sense
     rot_dists = pdist_rot(rots)
-    rot_dendor = linkage(rot_dists, "complete")
+    rot_dendor = linkage(rot_dists, method)
     rot_clusters = fcluster(rot_dendor, rot_max_deg, criterion="distance")
 
     # Combine the two clusterings, by creating new clusters
