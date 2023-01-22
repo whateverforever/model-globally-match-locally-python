@@ -44,11 +44,6 @@ def main():
         help="Fraction of scene points to use as reference",
     )
     parser.add_argument(
-        "--scene-pts-abs",
-        type=float,
-        help="Max absolute number of scene pts. Between fraction and abs, smaller value is taken.",
-    )
-    parser.add_argument(
         "--cluster-max-angle",
         type=float,
         default=30,
@@ -65,9 +60,6 @@ def main():
     assert hasattr(
         scene, "vertex_normals"
     ), "scene has no vertex normals (might be trimesh loading bug)"
-
-    # if no abs number given, use all scene verts
-    args.scene_pts_abs = args.scene_pts_abs or len(scene.vertices)
 
     print("Model has", len(model.vertices), "vertices")
     print("Scene has", len(scene.vertices), "vertices")
@@ -158,13 +150,6 @@ def main():
             # one accumulator per reference vert, we set it to zero instead of re-initializing
             accumulator[...] = 0
 
-            s_r = scene.vertices[sA]
-            s_normal = scene.vertex_normals[sA]
-
-            R_scene2glob = np.eye(4)
-            R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
-            T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
-
             for sB in pairs_scene[sA]:
                 if sA == sB:
                     continue
@@ -177,25 +162,24 @@ def main():
 
                 alpha_s = scene_alphas[(sA, sB)]
 
-                # print(
-                #     "Found",
-                #     len(ppfs_model[s_feature]),
-                #     "matching pairs in model",
-                #     " " * 20,
-                #     end="\r",
-                # )
                 for m_pair in ppfs_model[s_feature]:
                     mA, mB = m_pair
                     alpha_m = model_alphas[m_pair]
                     alpha = alpha_m - alpha_s
 
                     alpha_disc = int(alpha // alpha_step)
-                    # print("Alpha", np.degrees(alpha), "model:", np.degrees(alpha_m), "scene:", np.degrees(alpha_s), "alpha disc:", alpha_disc)
                     accumulator[mA, alpha_disc] += 1
 
             # peak_cutoff = np.quantile(accumulator.reshape(-1), 0.99)
             peak_cutoff = np.max(accumulator) * 0.9
             idxs_peaks = np.argwhere(accumulator > peak_cutoff)
+
+            s_r = scene.vertices[sA]
+            s_normal = scene.vertex_normals[sA]
+
+            R_scene2glob = np.eye(4)
+            R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
+            T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
 
             for best_mr, best_alpha in idxs_peaks:
                 R_model2glob = np.eye(4)
@@ -223,10 +207,6 @@ def main():
     print("Best score", best_score)
 
     poses.sort(key=lambda thing: thing[2], reverse=True)
-
-    bad_score_thresh = np.quantile(list(zip(*poses))[2], 0.1)
-    poses = list(filter(lambda thing: thing[2] > bad_score_thresh, poses))
-    print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
 
     t_cluster_start = time.perf_counter()
     pose_clusters = cluster_poses(
