@@ -8,6 +8,7 @@
 
 #include <iostream>
 #include <map>
+#include <random>
 #include <tuple>
 
 namespace nb = nanobind;
@@ -69,13 +70,26 @@ Eigen::Matrix3d alignVectors(const Vec3 &a, const Vec3 &b) {
 }
 
 auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
-                double step_dist, double max_dist, bool alphas = false) {
+                double step_dist, double max_dist, double ref_fraction = 1.0,
+                bool alphas = false) {
+  if (verts.rows() != normals.rows())
+    throw std::runtime_error{
+        "Reference vertices and normals need to have same size!"};
+
   Ref2Feature ref2feature;
   std::map<std::pair<int, int>, double> model_alphas;
 
   const int num_verts = verts.rows();
+  const double max_dist_sqr = max_dist * max_dist;
+
+  // If use specifies fraction for reference
+  std::default_random_engine gen;
+  std::uniform_real_distribution<double> rand(0.0, 1.0);
 
   for (int i = 0; i < num_verts; i++) {
+    if (ref_fraction < 1.0 && rand(gen) > ref_fraction)
+      continue;
+
     const auto &vertA = verts.row(i);
     const auto &normA = normals.row(i);
 
@@ -88,9 +102,9 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
 
       // speedup: duration x0.61
       const auto dist = (vertA - vertB).squaredNorm();
-      if (dist > max_dist * max_dist)
+      if (dist > max_dist_sqr)
         continue;
-      
+
       const auto F =
           computeFeature(vertA, vertB, normA, normB, step_rad, step_dist);
 
@@ -135,9 +149,9 @@ const auto toVec3 = [](const nbVec3 &vec) {
 NB_MODULE(ppf_fast, m) {
   m.def("compute_ppf",
         [](const nbMatX3 &verts, const nbMatX3 &normals, double step_rad,
-           double step_dist, double max_dist, bool alphas) {
+           double step_dist, double max_dist, double ref_fraction, bool alphas) {
           return computePPF(toMatX3(verts), toMatX3(normals), step_rad,
-                            step_dist, max_dist, alphas);
+                            step_dist, max_dist, ref_fraction, alphas);
         });
 
   m.def("vector_angle", [](const nbVec3 &vecA, const nbVec3 &vecB) {

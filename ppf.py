@@ -113,7 +113,13 @@ def main():
 
     t_start = time.perf_counter()
     pairs_scene, scene_alphas = ppf_fast.compute_ppf(
-        F_vertices, F_normals, angle_step, dist_step, model.scale, True
+        F_vertices,
+        F_normals,
+        angle_step,
+        dist_step,
+        model.scale,
+        args.scene_pts_fraction,
+        True,
     )
     t_end = time.perf_counter()
     print(f"Computing all scene ppfs took {t_end - t_start:.1f}s")
@@ -145,7 +151,8 @@ def main():
         for idx_ref, sA in enumerate(pairs_scene):
             print(
                 f"{idx_ref+1}/{len(pairs_scene)}: {len(pairs_scene[sA])} paired verts for ref {sA}",
-                " " * 20, end="\r"
+                " " * 20,
+                end="\r",
             )
 
             # one accumulator per reference vert, we set it to zero instead of re-initializing
