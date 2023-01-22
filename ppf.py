@@ -22,8 +22,6 @@ from scipy.spatial import KDTree
 from scipy.spatial.distance import pdist
 from scipy.cluster.hierarchy import linkage, fcluster
 
-import ppf_fast
-
 VIS = True
 CACHING = True
 
@@ -34,6 +32,9 @@ def main():
     )
     parser.add_argument("model", help="Path to the model pointcloud")
     parser.add_argument("scene", help="Path to the scene pointcloud")
+    parser.add_argument(
+        "--fast", action="store_true", help="Use the c++ extension for speeeeeed"
+    )
     parser.add_argument(
         "--scene-pts-fraction",
         default=0.2,
@@ -50,7 +51,7 @@ def main():
         "--ppf-rel-dist-step",
         default=0.05,
         type=float,
-        help="Discretization step of feature distances.",
+        help="Discretization step of feature distances, relative to model diameter.",
     )
     parser.add_argument(
         "--alpha-num-angles",
@@ -65,6 +66,14 @@ def main():
         help="Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]",
     )
     args = parser.parse_args()
+
+    if args.fast:
+        import ppf_fast
+        _compute_ppf = ppf_fast.compute_ppf
+        print("Using fast c++ mode")
+    else:
+        _compute_ppf = compute_ppf
+        print("Using slow python mode")
 
     model = trimesh.load(args.model)
     scene = trimesh.load(args.scene)
@@ -92,7 +101,7 @@ def main():
 
     print("Computing model ppfs features")
     t_start = time.perf_counter()
-    ppfs_model, _, model_alphas = ppf_fast.compute_ppf(
+    ppfs_model, _, model_alphas = _compute_ppf(
         to_nanobind(model.vertices),
         to_nanobind(model.vertex_normals),
         angle_step,
@@ -104,7 +113,7 @@ def main():
 
     ## 2. choose reference points in scene, compute their ppfs
     t_start = time.perf_counter()
-    _, pairs_scene, scene_alphas = ppf_fast.compute_ppf(
+    _, pairs_scene, scene_alphas = _compute_ppf(
         to_nanobind(scene.vertices),
         to_nanobind(scene.vertex_normals),
         angle_step,
