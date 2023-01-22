@@ -68,9 +68,8 @@ Eigen::Matrix3d alignVectors(const Vec3 &a, const Vec3 &b) {
   return Eigen::Matrix3d::Identity() + Vmat + Vmat * Vmat * h;
 }
 
-auto computePPF(const Vecs3 &verts, const Vecs3 &normals,
-                        double step_rad, double step_dist,
-                        bool alphas = false) {
+auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
+                double step_dist, double max_dist, bool alphas = false) {
   Ref2Feature ref2feature;
   std::map<std::pair<int, int>, double> model_alphas;
 
@@ -87,6 +86,11 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals,
       if (i == j)
         continue;
 
+      // speedup: duration x0.61
+      const auto dist = (vertA - vertB).squaredNorm();
+      if (dist > max_dist * max_dist)
+        continue;
+      
       const auto F =
           computeFeature(vertA, vertB, normA, normB, step_rad, step_dist);
 
@@ -102,10 +106,11 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals,
 
         // XXX should be Isometry3d, but Eigen rejects
         Eigen::Matrix3d R_model2glob = alignVectors(m_normal, Vec3(1, 0, 0));
-        Eigen::Affine3d T_model2glob = R_model2glob * Eigen::Translation3d(-m_r);
+        Eigen::Affine3d T_model2glob =
+            R_model2glob * Eigen::Translation3d(-m_r);
 
         const Vec3 m_ig = (T_model2glob * m_i).normalized();
-        const double alpha_m = vectorAngleSignedX(m_ig, Vec3(0,0,-1));
+        const double alpha_m = vectorAngleSignedX(m_ig, Vec3(0, 0, -1));
         model_alphas[{i, j}] = alpha_m;
       }
     }
@@ -128,10 +133,12 @@ const auto toVec3 = [](const nbVec3 &vec) {
 };
 
 NB_MODULE(ppf_fast, m) {
-  m.def("compute_ppf", [](const nbMatX3 &verts, const nbMatX3 &normals,
-                          double step_rad, double step_dist, bool alphas) {
-    return computePPF(toMatX3(verts), toMatX3(normals), step_rad, step_dist, alphas);
-  });
+  m.def("compute_ppf",
+        [](const nbMatX3 &verts, const nbMatX3 &normals, double step_rad,
+           double step_dist, double max_dist, bool alphas) {
+          return computePPF(toMatX3(verts), toMatX3(normals), step_rad,
+                            step_dist, max_dist, alphas);
+        });
 
   m.def("vector_angle", [](const nbVec3 &vecA, const nbVec3 &vecB) {
     return vectorAngle(toVec3(vecA), toVec3(vecB));
