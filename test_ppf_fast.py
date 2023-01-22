@@ -72,7 +72,7 @@ def test_compute_ppf():
     step_rad = 0.1
     step_dist = 0.1
 
-    _, pairs_model_py, _ = ppf.compute_ppf(mesh, step_rad, step_dist, alphas=False)
+    _, pairs_model_py, alphas_py = ppf.compute_ppf(mesh, step_rad, step_dist, alphas=True)
 
     # Current bug in nanobind: Doesn't recognize write protected arrays
     F_verts = np.asfortranarray(mesh.vertices)
@@ -80,12 +80,17 @@ def test_compute_ppf():
     F_norms = np.asfortranarray(mesh.vertex_normals)
     F_norms.setflags(write=True)
 
-    pairs_model_cpp = ppf_fast.compute_ppf(F_verts, F_norms, step_rad, step_dist)
+    pairs_model_cpp, alphas_cpp = ppf_fast.compute_ppf(F_verts, F_norms, step_rad, step_dist, True)
 
-    for key in pairs_model_cpp:
-        pypair = pairs_model_py[key[0]][key[1]]
-        if pypair is None:
-            continue
+    for ref in pairs_model_cpp:
+        for other in pairs_model_cpp[ref]:
+            pypair = pairs_model_py[ref][other]
+            print("pypair", pypair)
+            if pypair is None:
+                continue
+            ccpair = pairs_model_cpp[ref][other]
+            print("ccpair", ccpair)
 
-        # Allow result to be off by one bin in any of the features
-        assert np.sum(np.subtract(pypair, pairs_model_cpp[key])) <= 1
+            # Allow result to be off by one bin in any of the features
+            assert np.sum(np.subtract(ccpair, pypair)) <= 1
+            assert np.isclose(alphas_py[(ref, other)], alphas_cpp[(ref, other)])

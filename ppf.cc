@@ -14,7 +14,7 @@ namespace nb = nanobind;
 using namespace nb::literals;
 
 using Feature = std::tuple<int, int, int, int>;
-using Pair2Feature = std::map<std::pair<int, int>, Feature>;
+using Ref2Feature = std::map<int, std::map<int, Feature>>;
 using Vec3 = Eigen::Vector3d;
 using Vecs3 = Eigen::MatrixX3d;
 
@@ -68,13 +68,11 @@ Eigen::Matrix3d alignVectors(const Vec3 &a, const Vec3 &b) {
   return Eigen::Matrix3d::Identity() + Vmat + Vmat * Vmat * h;
 }
 
-Pair2Feature computePPF(const Vecs3 &verts, const Vecs3 &normals,
+auto computePPF(const Vecs3 &verts, const Vecs3 &normals,
                         double step_rad, double step_dist,
                         bool alphas = false) {
-  Pair2Feature ref2feature;
-
-  // std::cout << "verts" << verts << "\n";
-  // std::cout << "normals" << normals << "\n";
+  Ref2Feature ref2feature;
+  std::map<std::pair<int, int>, double> model_alphas;
 
   const int num_verts = verts.rows();
 
@@ -95,32 +93,28 @@ Pair2Feature computePPF(const Vecs3 &verts, const Vecs3 &normals,
       if (std::get<0>(F) == 0)
         continue;
 
-      ref2feature[{i, j}] = F;
+      ref2feature[i][j] = F;
 
       if (alphas) {
-        const auto &m_r = vertA;
-        const auto &m_i = vertB;
-        const auto &m_normal = normA;
+        const Vec3 &m_r = vertA;
+        const Vec3 &m_i = vertB;
+        const Vec3 &m_normal = normA;
 
-        Eigen::Matrix3d R_model2glob = Eigen::Matrix3d::Identity();
-        // R_model2glob.block<3, 3>(0, 0) = alignVectors(m_normal, Vec3(1, 0,
-        // 0));
+        // XXX should be Isometry3d, but Eigen rejects
+        Eigen::Matrix3d R_model2glob = alignVectors(m_normal, Vec3(1, 0, 0));
+        Eigen::Affine3d T_model2glob = R_model2glob * Eigen::Translation3d(-m_r);
+
+        const Vec3 m_ig = (T_model2glob * m_i).normalized();
+        const double alpha_m = vectorAngleSignedX(m_ig, Vec3(0,0,-1));
+        model_alphas[{i, j}] = alpha_m;
       }
-      // R_model2glob = np.eye(4)
-      // R_model2glob[:3, :3] = align_vectors(m_normal, [1, 0, 0])
-      // T_model2glob = R_model2glob @ tf.translation_matrix(-m_r)
-
-      // m_ig = (T_model2glob @ homog(m_i))[:3]
-      // m_ig /= np.linalg.norm(m_ig)
-      // alpha_m = vector_angle_signed_x(m_ig, [0, 0, -1])
-      // model_alphas[(ivertA, ivertB)] = alpha_m
     }
   }
 
-  return ref2feature;
+  return std::make_pair(ref2feature, model_alphas);
 }
 
-// Bindings
+//////////////////////////////////////////////////////////// Bindings
 
 using nbMatX3 = nb::tensor<double, nb::shape<nb::any, 3>, nb::f_contig>;
 using nbVec3 = nb::tensor<double, nb::shape<3>, nb::f_contig>;
@@ -135,8 +129,8 @@ const auto toVec3 = [](const nbVec3 &vec) {
 
 NB_MODULE(ppf_fast, m) {
   m.def("compute_ppf", [](const nbMatX3 &verts, const nbMatX3 &normals,
-                          double step_rad, double step_dist) {
-    return computePPF(toMatX3(verts), toMatX3(normals), step_rad, step_dist);
+                          double step_rad, double step_dist, bool alphas) {
+    return computePPF(toMatX3(verts), toMatX3(normals), step_rad, step_dist, alphas);
   });
 
   m.def("vector_angle", [](const nbVec3 &vecA, const nbVec3 &vecB) {

@@ -25,8 +25,10 @@ from scipy.spatial import KDTree
 from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 
+import ppf_fast
+
 VIS = True
-CACHING = False
+CACHING = True
 
 
 def main():
@@ -50,7 +52,7 @@ def main():
         "--cluster-max-angle",
         type=float,
         default=30,
-        help="Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]"
+        help="Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]",
     )
     args = parser.parse_args()
 
@@ -79,7 +81,7 @@ def main():
 
     # 1. compute ppfs of all vertex pairs in model, store in hash table
     angle_num = 30
-    angle_step = np.radians(360 / angle_num)
+    angle_step = float(np.radians(360 / angle_num))
     dist_step = 0.05 * model.scale
 
     modelbase, _ = os.path.splitext(args.model)
@@ -91,38 +93,30 @@ def main():
     else:
         print("Computing model ppfs features")
         t_start = time.perf_counter()
-        ppfs_model, pairs_model, model_alphas = compute_ppf(model, angle_step, dist_step, alphas=True)
+        ppfs_model, pairs_model, model_alphas = compute_ppf(
+            model, angle_step, dist_step, alphas=True
+        )
         t_end = time.perf_counter()
         print(
             f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s"
         )
 
         with open(model_ppf_path, "wb") as fh:
-            pickle.dump((ppfs_model, pairs_model), fh)
+            pickle.dump((ppfs_model, pairs_model, model_alphas), fh)
 
     # 2. choose reference points in scene, compute their ppfs
-    scenebase, _ = os.path.splitext(args.scene)
-    scene_ppf_path = f"{scenebase}.scene.ppf"
-    if CACHING and os.path.exists(scene_ppf_path):
-        print("Loading scene features from", scene_ppf_path)
-        with open(scene_ppf_path, "rb") as fh:
-            _, pairs_scene, _ = pickle.load(fh)
-    else:
-        print("Computing scene ppfs features")
-        t_start = time.perf_counter()
-        _, pairs_scene, _ = compute_ppf(
-            scene,
-            angle_step,
-            dist_step,
-            args.scene_pts_fraction,
-            args.scene_pts_abs,
-            model.scale/2,
-        )
-        t_end = time.perf_counter()
-        print(f"Computing ppfs for the scene took {t_end - t_start:.2f}s")
+    # current bug in nanobind: arrays need to be writable to be recognized
+    F_vertices = np.asfortranarray(scene.vertices)
+    F_vertices.setflags(write=True)
+    F_normals = np.asfortranarray(scene.vertex_normals)
+    F_normals.setflags(write=True)
 
-        with open(scene_ppf_path, "wb") as fh:
-            pickle.dump((None, pairs_scene, None), fh)
+    t_start = time.perf_counter()
+    pairs_scene, _ = ppf_fast.compute_ppf(
+        F_vertices, F_normals, angle_step, dist_step, False
+    )
+    t_end = time.perf_counter()
+    print(f"Computing all scene ppfs took {t_end - t_start:.0f}s")
 
     # 3. go through scene ppfs, look up in table if we find model ppf
     skipped_features = 0
@@ -132,8 +126,7 @@ def main():
     alpha_step = np.radians(360 / alpha_num)
     assert 360 % alpha_num == 0
 
-    scene_tree = KDTree(scene.vertices)
-
+    scenebase = os.path.dirname(args.scene)
     poses_path = os.path.join(
         os.path.dirname(modelbase),
         f"{os.path.basename(modelbase)}_{os.path.basename(scenebase)}.poses",
@@ -150,7 +143,10 @@ def main():
 
         print("Num reference verts", len(pairs_scene))
         for idx_ref, sA in enumerate(pairs_scene):
-            print(f"{idx_ref+1}/{len(pairs_scene)}: {len(pairs_scene[sA])} paired verts for ref {sA}", " " * 20)
+            print(
+                f"{idx_ref+1}/{len(pairs_scene)}: {len(pairs_scene[sA])} paired verts for ref {sA}",
+                " " * 20,
+            )
 
             # one accumulator per reference vert, we set it to zero instead of re-initializing
             accumulator[...] = 0
@@ -215,7 +211,6 @@ def main():
 
         with open(poses_path, "wb") as fh:
             pickle.dump(poses, fh)
-        
 
     print(f"Got {len(poses)} poses after matching")
     print("Skipped", skipped_features, "features")
@@ -230,7 +225,9 @@ def main():
     print(f"Got {len(poses)} poses after filtering (>{bad_score_thresh})")
 
     t_cluster_start = time.perf_counter()
-    pose_clusters = cluster_poses(poses, dist_max=model.scale * 0.5, rot_max_deg=args.cluster_max_angle)
+    pose_clusters = cluster_poses(
+        poses, dist_max=model.scale * 0.5, rot_max_deg=args.cluster_max_angle
+    )
     poses = pose_clusters
     t_cluster_end = time.perf_counter()
     print(f"Clustering took {t_cluster_end - t_cluster_start:.1f}s")
@@ -301,8 +298,10 @@ def compute_feature(vertA, vertB, normA, normB, angle_step=None, dist_step=None)
 
     return (F1, F2, F3, F4)
 
+
 def homog(vec3):
     return [*vec3, 1]
+
 
 def compute_ppf(
     mesh: trimesh.Trimesh,
@@ -311,7 +310,7 @@ def compute_ppf(
     ref_fraction=1.0,
     ref_abs=None,
     max_dist=np.inf,
-    alphas=False
+    alphas=False,
 ):
     table = defaultdict(list)
     ref2feature = defaultdict(dict)
@@ -365,7 +364,7 @@ def compute_ppf(
                 R_model2glob = np.eye(4)
                 R_model2glob[:3, :3] = align_vectors(m_normal, [1, 0, 0])
                 T_model2glob = R_model2glob @ tf.translation_matrix(-m_r)
-            
+
                 m_ig = (T_model2glob @ homog(m_i))[:3]
                 m_ig /= np.linalg.norm(m_ig)
                 alpha_m = vector_angle_signed_x(m_ig, [0, 0, -1])
@@ -454,6 +453,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     )
 
     import matplotlib.pyplot as plt
+
     plt.hist(cluster_scores, histtype="stepfilled", bins=100)
     plt.title("Cluster Scores Histogram")
     plt.show()
@@ -470,7 +470,6 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     for idx_cluster, top_cluster in enumerate(sorted_clusters[:10]):
         print(f"{idx_cluster} contains {len(out_ts[top_cluster])} poses")
 
-    
     best_score = np.max(cluster_scores)
     best_rel_thresh = 0.5
 
