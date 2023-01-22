@@ -401,22 +401,25 @@ assert np.isclose(rotation_between(matA, matB), np.pi / 4), rotation_between(mat
 
 
 def pdist_rot(rot_mats):
-    """Returns a distance matrix like pdist, but in rotation space"""
+    """Returns the condensed distance matrix like pdist, but in rotation space"""
+    m = len(rot_mats)
+    idx = lambda i, j: m * i + j - ((i + 2) * (i + 1)) // 2
+    print("Index for last pair", idx(m, m) + 1)
 
     # we save distance in degrees and use uint8 for smaller memory footprint
-    dists = np.zeros((len(rot_mats), len(rot_mats)), dtype=np.uint8)
+    dists = np.zeros(idx(m, m) + 1, dtype=np.uint8)
     print("dists shape", dists.shape)
 
-    # XXX instead of distance matrix, compute condensed form to save memory
-    mat_idxs = np.arange(len(rot_mats))
+    mat_idxs = np.arange(m)
+    # Note: combinations() doesn't give (i,i) pairs
+    # Note: combinations() keeps original ascending index order
     for idxA, idxB in itertools.combinations(mat_idxs, 2):
         dist = np.degrees(rotation_between(rot_mats[idxA], rot_mats[idxB])).astype(
             np.uint8
         )
-        dists[idxA, idxB] = dist
-        dists[idxB, idxA] = dist
+        dists[idx(idxA, idxB)] = dist
 
-    return squareform(dists).astype(float)
+    return dists.astype(float)
 
 
 def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
