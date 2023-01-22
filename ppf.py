@@ -22,9 +22,6 @@ from scipy.spatial import KDTree
 from scipy.spatial.distance import pdist
 from scipy.cluster.hierarchy import linkage, fcluster
 
-VIS = True
-CACHING = True
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -91,9 +88,8 @@ def main():
     model.visual.vertex_colors = [[255, 0, 0, 255] for _ in model.vertices]
     scene.visual.vertex_colors = [[150, 200, 150, 240] for _ in scene.vertices]
 
-    if VIS:
-        vis = trimesh.Scene([model, scene])
-        vis.show()
+    vis = trimesh.Scene([model, scene])
+    vis.show()
 
     ## 1. compute ppfs of all vertex pairs in model, store in hash table
     angle_step = float(np.radians(360 / args.ppf_num_angles))
@@ -106,7 +102,6 @@ def main():
         to_nanobind(model.vertex_normals),
         angle_step,
         dist_step,
-        alphas=True,
     )
     t_end = time.perf_counter()
     print(f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s")
@@ -120,7 +115,6 @@ def main():
         dist_step,
         max_dist=model.scale,
         ref_fraction=args.scene_pts_fraction,
-        alphas=True,
     )
     t_end = time.perf_counter()
     print(f"Computing all scene ppfs took {t_end - t_start:.1f}s")
@@ -213,7 +207,6 @@ def main():
         print("Score", score)
         print(np.around(T_model2scene, decimals=2))
         print()
-
     vis.show()
 
 
@@ -441,15 +434,12 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
         np.count_nonzero(pose_clusters == best_cluster),
     )
 
-    import matplotlib.pyplot as plt
-
     plt.hist(cluster_scores, histtype="stepfilled", bins=100)
     plt.title("Cluster Scores Histogram")
     plt.show()
 
     out_ts = defaultdict(list)
     out_Rs = defaultdict(list)
-    num_skipped_clusters = 0
     for pose_idx, cluster_idx in enumerate(pose_clusters):
         out_ts[cluster_idx].append(locs[pose_idx])
         out_Rs[cluster_idx].append(rots[pose_idx])
@@ -479,7 +469,6 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
         out_poses.append((out_T, 0, cluster_scores[cluster_idx]))
 
     print("Returning", len(out_poses), "clustered and averaged poses")
-
     return out_poses
 
 

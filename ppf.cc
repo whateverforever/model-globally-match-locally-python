@@ -71,8 +71,7 @@ Eigen::Matrix3d alignVectors(const Vec3 &a, const Vec3 &b) {
 }
 
 auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
-                double step_dist, double max_dist, double ref_fraction = 1.0,
-                bool alphas = false) {
+                double step_dist, double max_dist, double ref_fraction = 1.0) {
   if (verts.rows() != normals.rows())
     throw std::runtime_error{
         "Reference vertices and normals need to have same size!"};
@@ -113,23 +112,20 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
       if (std::get<0>(F) == 0)
         continue;
 
-      ppfs[F].emplace_back(i,j);
+      ppfs[F].emplace_back(i, j);
       ref2feature[i][j] = F;
 
-      if (alphas) {
-        const Vec3 &m_r = vertA;
-        const Vec3 &m_i = vertB;
-        const Vec3 &m_normal = normA;
+      const Vec3 &m_r = vertA;
+      const Vec3 &m_i = vertB;
+      const Vec3 &m_normal = normA;
 
-        // XXX should be Isometry3d, but Eigen rejects
-        Eigen::Matrix3d R_model2glob = alignVectors(m_normal, Vec3(1, 0, 0));
-        Eigen::Affine3d T_model2glob =
-            R_model2glob * Eigen::Translation3d(-m_r);
+      // XXX should be Isometry3d, but Eigen rejects
+      Eigen::Matrix3d R_model2glob = alignVectors(m_normal, Vec3(1, 0, 0));
+      Eigen::Affine3d T_model2glob = R_model2glob * Eigen::Translation3d(-m_r);
 
-        const Vec3 m_ig = (T_model2glob * m_i).normalized();
-        const double alpha_m = vectorAngleSignedX(m_ig, Vec3(0, 0, -1));
-        model_alphas[{i, j}] = alpha_m;
-      }
+      const Vec3 m_ig = (T_model2glob * m_i).normalized();
+      const double alpha_m = vectorAngleSignedX(m_ig, Vec3(0, 0, -1));
+      model_alphas[{i, j}] = alpha_m;
     }
   }
 
@@ -153,13 +149,13 @@ NB_MODULE(ppf_fast, m) {
   m.def(
       "compute_ppf",
       [](const nbMatX3 &verts, const nbMatX3 &normals, double step_rad,
-         double step_dist, double max_dist, double ref_fraction, bool alphas) {
+         double step_dist, double max_dist, double ref_fraction) {
         return computePPF(toMatX3(verts), toMatX3(normals), step_rad, step_dist,
-                          max_dist, ref_fraction, alphas);
+                          max_dist, ref_fraction);
       },
       "verts"_a, "normals"_a, "step_rad"_a, "step_dist"_a,
       "max_dist"_a = std::numeric_limits<double>::infinity(),
-      "ref_fraction"_a = 1.0, "alphas"_a = false);
+      "ref_fraction"_a = 1.0);
 
   m.def("vector_angle", [](const nbVec3 &vecA, const nbVec3 &vecB) {
     return vectorAngle(toVec3(vecA), toVec3(vecB));
