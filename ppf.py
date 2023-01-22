@@ -7,13 +7,10 @@ Note: Currently, trimesh doesn't support pointcloud with normals. To combat this
       reconstruct some surface between the points (e.g. ball pivoting)
 """
 
-import os
 import random
 import time
 import argparse
-import pickle
 import itertools
-import math
 from collections import defaultdict
 
 import trimesh
@@ -22,8 +19,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from scipy.spatial import KDTree
-from scipy.spatial.distance import pdist, squareform
-from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+from scipy.spatial.distance import pdist
+from scipy.cluster.hierarchy import linkage, fcluster
 
 import ppf_fast
 
@@ -59,7 +56,7 @@ def main():
         "--alpha-num-angles",
         default=30,
         type=int,
-        help="Number of angle steps used to discretize the rotation angle alpha."
+        help="Number of angle steps used to discretize the rotation angle alpha.",
     )
     parser.add_argument(
         "--cluster-max-angle",
@@ -95,26 +92,26 @@ def main():
 
     print("Computing model ppfs features")
     t_start = time.perf_counter()
-    ppfs_model, _, model_alphas = compute_ppf(model, angle_step, dist_step, alphas=True)
+    ppfs_model, _, model_alphas = ppf_fast.compute_ppf(
+        to_nanobind(model.vertices),
+        to_nanobind(model.vertex_normals),
+        angle_step,
+        dist_step,
+        alphas=True,
+    )
     t_end = time.perf_counter()
     print(f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s")
 
     ## 2. choose reference points in scene, compute their ppfs
-    # current bug in nanobind: arrays need to be writable to be recognized
-    F_vertices = np.asfortranarray(scene.vertices)
-    F_vertices.setflags(write=True)
-    F_normals = np.asfortranarray(scene.vertex_normals)
-    F_normals.setflags(write=True)
-
     t_start = time.perf_counter()
-    pairs_scene, scene_alphas = ppf_fast.compute_ppf(
-        F_vertices,
-        F_normals,
+    _, pairs_scene, scene_alphas = ppf_fast.compute_ppf(
+        to_nanobind(scene.vertices),
+        to_nanobind(scene.vertex_normals),
         angle_step,
         dist_step,
-        model.scale,
-        args.scene_pts_fraction,
-        True,
+        max_dist=model.scale,
+        ref_fraction=args.scene_pts_fraction,
+        alphas=True,
     )
     t_end = time.perf_counter()
     print(f"Computing all scene ppfs took {t_end - t_start:.1f}s")
@@ -211,6 +208,16 @@ def main():
     vis.show()
 
 
+def to_nanobind(arr):
+    """
+    Workaround for current bug in nanobind: arrays need to be writable to be recognized
+    https://github.com/wjakob/nanobind/issues/42
+    """
+    F_arr = np.asfortranarray(arr)
+    F_arr.setflags(write=True)
+    return F_arr
+
+
 def vector_angle_signed_x(vecA, vecB):
     assert np.isclose(np.linalg.norm(vecA), 1)
     assert np.isclose(np.linalg.norm(vecB), 1)
@@ -272,7 +279,8 @@ def homog(vec3):
 
 
 def compute_ppf(
-    mesh: trimesh.Trimesh,
+    vertices,
+    normals,
     angle_step: float,
     dist_step: float,
     ref_fraction=1.0,
@@ -284,30 +292,28 @@ def compute_ppf(
     ref2feature = defaultdict(dict)
     model_alphas = {}
 
-    idxs = range(len(mesh.vertices))
+    idxs = range(len(vertices))
 
-    num_pts = int(ref_fraction * len(mesh.vertices))
-    num_pts = min(num_pts, ref_abs or len(mesh.vertices))
+    num_pts = int(ref_fraction * len(vertices))
+    num_pts = min(num_pts, ref_abs or len(vertices))
     idxsA = random.sample(idxs, k=num_pts)
-    print(
-        f"Going for {num_pts} reference pts ({num_pts/len(mesh.vertices) * 100:.0f}%)"
-    )
+    print(f"Going for {num_pts} reference pts ({num_pts/len(vertices) * 100:.0f}%)")
 
     # without KDTREE: Computing ppfs for the scene took 2134.7s
     # with KDTree:                                       814.9s
-    vert_tree = KDTree(mesh.vertices)
+    vert_tree = KDTree(vertices)
 
     num = 0
     for ivertA in idxsA:
-        vertA = mesh.vertices[ivertA]
+        vertA = vertices[ivertA]
 
         for ivertB in vert_tree.query_ball_point(vertA, max_dist):
             if ivertA == ivertB:
                 continue
 
-            normA = mesh.vertex_normals[ivertA]
-            normB = mesh.vertex_normals[ivertB]
-            vertB = mesh.vertices[ivertB]
+            normA = normals[ivertA]
+            normB = normals[ivertB]
+            vertB = vertices[ivertB]
 
             F = compute_feature(
                 vertA, vertB, normA, normB, angle_step=angle_step, dist_step=dist_step
@@ -318,7 +324,7 @@ def compute_ppf(
 
             num += 1
             if num < 500 or num % 10000 == 0:
-                print("pair", num, f"{num/(len(mesh.vertices)**2)*100:.0f}%", end="\r")
+                print("pair", num, f"{num/(len(vertices)**2)*100:.0f}%", end="\r")
 
             table[F].append((ivertA, ivertB))
             ref2feature[ivertA][ivertB] = F

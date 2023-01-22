@@ -2,6 +2,7 @@
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/tuple.h>
+#include <nanobind/stl/vector.h>
 #include <nanobind/tensor.h>
 
 #include <Eigen/Dense>
@@ -76,6 +77,7 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
     throw std::runtime_error{
         "Reference vertices and normals need to have same size!"};
 
+  std::map<Feature, std::vector<std::pair<int, int>>> ppfs;
   Ref2Feature ref2feature;
   std::map<std::pair<int, int>, double> model_alphas;
 
@@ -111,6 +113,7 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
       if (std::get<0>(F) == 0)
         continue;
 
+      ppfs[F].emplace_back(i,j);
       ref2feature[i][j] = F;
 
       if (alphas) {
@@ -130,7 +133,7 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
     }
   }
 
-  return std::make_pair(ref2feature, model_alphas);
+  return std::make_tuple(ppfs, ref2feature, model_alphas);
 }
 
 //////////////////////////////////////////////////////////// Bindings
@@ -147,12 +150,16 @@ const auto toVec3 = [](const nbVec3 &vec) {
 };
 
 NB_MODULE(ppf_fast, m) {
-  m.def("compute_ppf",
-        [](const nbMatX3 &verts, const nbMatX3 &normals, double step_rad,
-           double step_dist, double max_dist, double ref_fraction, bool alphas) {
-          return computePPF(toMatX3(verts), toMatX3(normals), step_rad,
-                            step_dist, max_dist, ref_fraction, alphas);
-        });
+  m.def(
+      "compute_ppf",
+      [](const nbMatX3 &verts, const nbMatX3 &normals, double step_rad,
+         double step_dist, double max_dist, double ref_fraction, bool alphas) {
+        return computePPF(toMatX3(verts), toMatX3(normals), step_rad, step_dist,
+                          max_dist, ref_fraction, alphas);
+      },
+      "verts"_a, "normals"_a, "step_rad"_a, "step_dist"_a,
+      "max_dist"_a = std::numeric_limits<double>::infinity(),
+      "ref_fraction"_a = 1.0, "alphas"_a = false);
 
   m.def("vector_angle", [](const nbVec3 &vecA, const nbVec3 &vecB) {
     return vectorAngle(toVec3(vecA), toVec3(vecB));
