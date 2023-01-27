@@ -75,20 +75,32 @@ def main():
     model = trimesh.load(args.model)
     scene = trimesh.load(args.scene)
 
-    assert hasattr(
-        model, "vertex_normals"
-    ), "model has no vertex normals (might be trimesh loading bug)"
-    assert hasattr(
-        scene, "vertex_normals"
-    ), "scene has no vertex normals (might be trimesh loading bug)"
+    if hasattr(model, "vertex_normals") and hasattr(scene, "vertex_normals"):
+        _model_vis = model.copy()
+        _scene_vis = scene.copy()
+    else:
+        try:
+            print("Your trimesh version still can't load pointclouds with normals. Trying open3d...")
+            import open3d as o3d
+            model = o3d.io.read_point_cloud(args.model)
+            scene = o3d.io.read_point_cloud(args.scene)
+
+            model = trimesh.Trimesh(np.asarray(model.points), vertex_normals=np.asarray(model.normals))
+            scene = trimesh.Trimesh(np.asarray(scene.points), vertex_normals=np.asarray(scene.normals))
+
+            _model_vis = trimesh.PointCloud(vertices=model.vertices)
+            _scene_vis = trimesh.PointCloud(vertices=scene.vertices)
+        except ImportError as e:
+            print("Fallback to open3d failed", e)
+            quit()
 
     print("Model has", len(model.vertices), "vertices")
     print("Scene has", len(scene.vertices), "vertices")
+    
+    _model_vis.visual.vertex_colors = [[255, 0, 0, 255] for _ in _model_vis.vertices]
+    _scene_vis.visual.vertex_colors = [[150, 200, 150, 240] for _ in _scene_vis.vertices]
 
-    model.visual.vertex_colors = [[255, 0, 0, 255] for _ in model.vertices]
-    scene.visual.vertex_colors = [[150, 200, 150, 240] for _ in scene.vertices]
-
-    vis = trimesh.Scene([model, scene])
+    vis = trimesh.Scene([_model_vis, _scene_vis])
     vis.show()
 
     ## 1. compute ppfs of all vertex pairs in model, store in hash table
@@ -158,6 +170,8 @@ def main():
 
                 alpha_disc = int(alpha // alpha_step)
                 accumulator[mA, alpha_disc] += 1
+                # accumulator[mA, (alpha_disc - 1) % args.alpha_num_angles] += 1
+                # accumulator[mA, (alpha_disc + 1) % args.alpha_num_angles] += 1
 
         peak_cutoff = np.max(accumulator) * 0.9
         idxs_peaks = np.argwhere(accumulator > peak_cutoff)
@@ -198,9 +212,11 @@ def main():
     scene_refs = trimesh.PointCloud(
         [scene.vertices[idx] for idx in list(pairs_scene.keys())]
     )
-    vis = trimesh.Scene([scene, scene_refs])
+    vis = trimesh.Scene([_scene_vis, scene_refs])
     for T_model2scene, m_r, score in poses:
-        model_vis = model.copy()
+        model_vis = _model_vis.copy()
+        color = (*np.random.randint(0,255, size=3), 255)
+        model_vis.visual.vertex_colors = [color for _ in model_vis.vertices]
         model_vis.apply_transform(T_model2scene)
         vis.add_geometry(model_vis)
 
@@ -399,8 +415,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     locs = np.array([T_m2s[:3, 3] for T_m2s, _, _ in poses])
     scores = np.array([score for _, _, score in poses])
 
-    method = "average"
-    method = "complete"
+    method = "centroid"
 
     # 1) cluster by location
     dist_dists = pdist(locs)
@@ -426,12 +441,12 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     for pose_score, pose_cluster in zip(scores, pose_clusters):
         cluster_scores[pose_cluster] += pose_score
 
-    best_cluster = np.argmax(cluster_scores)
+    best_cluster_idx = np.argmax(cluster_scores)
     print(
         "Best cluster",
-        best_cluster,
-        cluster_scores[best_cluster],
-        np.count_nonzero(pose_clusters == best_cluster),
+        best_cluster_idx,
+        cluster_scores[best_cluster_idx],
+        np.count_nonzero(pose_clusters == best_cluster_idx),
     )
 
     plt.hist(cluster_scores, histtype="stepfilled", bins=100)
@@ -447,10 +462,16 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
     sorted_clusters = np.argsort(cluster_scores)[::-1]
 
     for idx_cluster, top_cluster in enumerate(sorted_clusters[:10]):
-        print(f"{idx_cluster} contains {len(out_ts[top_cluster])} poses")
+        print(f"cluster {idx_cluster} contains {len(out_ts[top_cluster])} poses")
 
-    best_score = np.max(cluster_scores)
-    best_rel_thresh = 0.5
+    best_cluster_idx = np.argmax(cluster_scores)
+    best_score = cluster_scores[best_cluster_idx]
+    best_rel_thresh = 0.1
+
+    ## cluster the clusters using mahalanobis, to get fits from outliers
+    # cluster_dists = pdist(cluster_scores, metric="mahalanobis")
+    # cluster_clusters = fcluster(cluster_dists)
+    # best_cluster_cluster = cluster
 
     out_poses = []
     for cluster_idx in sorted_clusters:
