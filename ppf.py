@@ -104,8 +104,12 @@ def main():
             print("Fallback to open3d failed", e)
             quit()
 
-    print("Model has", len(model.vertices), "vertices")
-    print("Scene has", len(scene.vertices), "vertices")
+    print("Model has", len(model.vertices), "vertices. scale=", model.scale)
+    print("Scene has", len(scene.vertices), "vertices. scale=", scene.scale)
+
+    # trimesh doesn't support .scale for point clouds
+    modelscale = np.linalg.norm(np.max(model.vertices, axis=0) - np.min(model.vertices, axis=0))
+    print("modelscale", modelscale)
 
     _model_vis.visual.vertex_colors = [[255, 0, 0, 255] for _ in _model_vis.vertices]
     _scene_vis.visual.vertex_colors = [
@@ -120,7 +124,7 @@ def main():
 
     ## 1. compute ppfs of all vertex pairs in model, store in hash table
     angle_step = float(np.radians(360 / args.ppf_num_angles))
-    dist_step = args.ppf_rel_dist_step * model.scale
+    dist_step = args.ppf_rel_dist_step * modelscale
 
     print("Computing model ppfs features")
     t_start = time.perf_counter()
@@ -140,7 +144,7 @@ def main():
         to_nanobind(scene.vertex_normals),
         angle_step,
         dist_step,
-        max_dist=model.scale,
+        max_dist=modelscale,
         ref_fraction=args.scene_pts_fraction,
     )
     t_end = time.perf_counter()
@@ -218,7 +222,7 @@ def main():
     t_cluster_start = time.perf_counter()
     pose_clusters = cluster_poses(
         poses,
-        dist_max=model.scale * 0.5,
+        dist_max=modelscale * 0.5,
         rot_max_deg=args.cluster_max_angle,
         pdist_rot=_pdist_rot,
     )
@@ -428,7 +432,7 @@ def pdist_rot(rot_mats):
     return dists.astype(float)
 
 
-def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=pdist_rot):
+def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
     rots = np.array([T_m2s[:3, :3] for T_m2s, _, _ in poses])
     locs = np.array([T_m2s[:3, 3] for T_m2s, _, _ in poses])
     scores = np.array([score for _, _, score in poses])
@@ -482,21 +486,20 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=pdist_rot):
     for idx_cluster, top_cluster in enumerate(sorted_clusters[:10]):
         print(f"cluster {idx_cluster} contains {len(out_ts[top_cluster])} poses")
 
+    geo = lambda x, y: np.sqrt(x * y)
+
     best_cluster_idx = np.argmax(cluster_scores)
     best_score = cluster_scores[best_cluster_idx]
-    best_rel_thresh = 0.1
-
-    ## cluster the clusters using mahalanobis, to get fits from outliers
-    # cluster_dists = pdist(cluster_scores, metric="mahalanobis")
-    # cluster_clusters = fcluster(cluster_dists)
-    # best_cluster_cluster = cluster
+    best_geo_score = geo(best_score, len(out_ts[best_cluster_idx]))
+    best_rel_thresh = 0.5
 
     out_poses = []
     for cluster_idx in sorted_clusters:
-        if cluster_scores[cluster_idx] < best_rel_thresh * best_score:
+        geo_score = geo(len(out_ts[cluster_idx]), cluster_scores[cluster_idx])
+        if geo_score < best_rel_thresh * best_geo_score:
             continue
 
-        print("cluster idx", cluster_idx, cluster_scores[cluster_idx])
+        print("cluster idx", cluster_idx, cluster_scores[cluster_idx], "geoscore", geo_score)
         ts = out_ts[cluster_idx]
         Rs = out_Rs[cluster_idx]
 
@@ -505,7 +508,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=pdist_rot):
         out_T = np.eye(4)
         out_T[:3, :3] = avg_R[:3, :3]
         out_T[:3, 3] = avg_t
-        out_poses.append((out_T, 0, cluster_scores[cluster_idx]))
+        out_poses.append((out_T, 0, geo_score))
 
     print("Returning", len(out_poses), "clustered and averaged poses")
     return out_poses

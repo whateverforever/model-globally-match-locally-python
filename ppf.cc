@@ -16,7 +16,7 @@
 namespace nb = nanobind;
 using namespace nb::literals;
 
-using Feature = std::tuple<int, int, int, int>;
+using Feature = std::tuple<uint8_t, uint8_t, uint8_t, uint8_t>;
 using Ref2Feature = std::map<int, std::map<int, Feature>>;
 using Vec3 = Eigen::Vector3d;
 using Vecs3 = Eigen::MatrixX3d;
@@ -25,10 +25,7 @@ using Vecs3 = Eigen::MatrixX3d;
  *  Computes the angle between two vectors originating from the same location
  */
 double vectorAngle(const Vec3 &vecA, const Vec3 &vecB) {
-  const Vec3 normedA = vecA.normalized();
-  const Vec3 normedB = vecB.normalized();
-
-  return std::acos(normedA.dot(normedB));
+  return std::acos(vecA.normalized().dot(vecB.normalized()));
 }
 
 /**
