@@ -5,7 +5,7 @@
 >
 > Use the `--fast` flag to use the binary extension (see instructions below)
 
-![](screenshot.png)
+![Screenshots of a model and scene before matching and after matching with PPF-Voting.](screenshot.png)
 
 # Usage
 
@@ -40,6 +40,14 @@ options:
                         Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]
 ```
 
+# Object Symmetry Extraction
+
+> Another neat thing you can do with PPF-Voting is figuring out object symmetries. You simply give the mesh
+> of your model (or a resampled version of it) to `ppf.py` and it will figure out the rest.
+> You'd probably want to combine it with ICP though.
+
+![Screenshot showing different symmetric poses of the same object.](screenshot_symmetries.png)
+
 # Gotchas
 
 - This is very much an exploratory implementation to understand the paper. No guarantees for correctness, no speed.
@@ -63,5 +71,3 @@ make
 
 Additionally, symlink the resulting `.so` to the main folder. Now you should be able to
 run `ppf.py` with the `--fast` option.
-
-
