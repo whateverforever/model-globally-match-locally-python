@@ -66,10 +66,13 @@ def main():
 
     if args.fast:
         import ppf_fast
+
         _compute_ppf = ppf_fast.compute_ppf
+        _pdist_rot = ppf_fast.pdist_rot
         print("Using fast c++ mode")
     else:
         _compute_ppf = compute_ppf
+        _pdist_rot = pdist_rot
         print("Using slow python mode")
 
     model = trimesh.load(args.model)
@@ -80,13 +83,20 @@ def main():
         _scene_vis = scene.copy()
     else:
         try:
-            print("Your trimesh version still can't load pointclouds with normals. Trying open3d...")
+            print(
+                "Your trimesh version still can't load pointclouds with normals. Trying open3d..."
+            )
             import open3d as o3d
+
             model = o3d.io.read_point_cloud(args.model)
             scene = o3d.io.read_point_cloud(args.scene)
 
-            model = trimesh.Trimesh(np.asarray(model.points), vertex_normals=np.asarray(model.normals))
-            scene = trimesh.Trimesh(np.asarray(scene.points), vertex_normals=np.asarray(scene.normals))
+            model = trimesh.Trimesh(
+                np.asarray(model.points), vertex_normals=np.asarray(model.normals)
+            )
+            scene = trimesh.Trimesh(
+                np.asarray(scene.points), vertex_normals=np.asarray(scene.normals)
+            )
 
             _model_vis = trimesh.PointCloud(vertices=model.vertices)
             _scene_vis = trimesh.PointCloud(vertices=scene.vertices)
@@ -96,9 +106,14 @@ def main():
 
     print("Model has", len(model.vertices), "vertices")
     print("Scene has", len(scene.vertices), "vertices")
-    
+
     _model_vis.visual.vertex_colors = [[255, 0, 0, 255] for _ in _model_vis.vertices]
-    _scene_vis.visual.vertex_colors = [[150, 200, 150, 240] for _ in _scene_vis.vertices]
+    _scene_vis.visual.vertex_colors = [
+        [150, 200, 150, 240] for _ in _scene_vis.vertices
+    ]
+
+    plt.figure()
+    plt.show()
 
     vis = trimesh.Scene([_model_vis, _scene_vis])
     vis.show()
@@ -202,7 +217,10 @@ def main():
 
     t_cluster_start = time.perf_counter()
     pose_clusters = cluster_poses(
-        poses, dist_max=model.scale * 0.5, rot_max_deg=args.cluster_max_angle
+        poses,
+        dist_max=model.scale * 0.5,
+        rot_max_deg=args.cluster_max_angle,
+        pdist_rot=_pdist_rot,
     )
     poses = pose_clusters
     t_cluster_end = time.perf_counter()
@@ -215,7 +233,7 @@ def main():
     vis = trimesh.Scene([_scene_vis, scene_refs])
     for T_model2scene, m_r, score in poses:
         model_vis = _model_vis.copy()
-        color = (*np.random.randint(0,255, size=3), 255)
+        color = (*np.random.randint(0, 255, size=3), 255)
         model_vis.visual.vertex_colors = [color for _ in model_vis.vertices]
         model_vis.apply_transform(T_model2scene)
         vis.add_geometry(model_vis)
@@ -410,7 +428,7 @@ def pdist_rot(rot_mats):
     return dists.astype(float)
 
 
-def cluster_poses(poses, dist_max=0.5, rot_max_deg=10):
+def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=pdist_rot):
     rots = np.array([T_m2s[:3, :3] for T_m2s, _, _ in poses])
     locs = np.array([T_m2s[:3, 3] for T_m2s, _, _ in poses])
     scores = np.array([score for _, _, score in poses])

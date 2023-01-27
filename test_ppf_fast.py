@@ -1,6 +1,7 @@
 import math
 
 import trimesh
+import trimesh.transformations as tf
 import numpy as np
 import ppf_fast
 import ppf
@@ -72,7 +73,7 @@ def test_compute_ppf():
     step_rad = 0.1
     step_dist = 0.1
 
-    _, pairs_model_py, alphas_py = ppf.compute_ppf(mesh, step_rad, step_dist, alphas=True)
+    _, pairs_model_py, alphas_py = ppf.compute_ppf(mesh.vertices, mesh.vertex_normals, step_rad, step_dist, alphas=True)
 
     # Current bug in nanobind: Doesn't recognize write protected arrays
     F_verts = np.asfortranarray(mesh.vertices)
@@ -80,7 +81,7 @@ def test_compute_ppf():
     F_norms = np.asfortranarray(mesh.vertex_normals)
     F_norms.setflags(write=True)
 
-    pairs_model_cpp, alphas_cpp = ppf_fast.compute_ppf(F_verts, F_norms, step_rad, step_dist, True)
+    _, pairs_model_cpp, alphas_cpp = ppf_fast.compute_ppf(F_verts, F_norms, step_rad, step_dist, True)
 
     for ref in pairs_model_cpp:
         for other in pairs_model_cpp[ref]:
@@ -94,3 +95,26 @@ def test_compute_ppf():
             # Allow result to be off by one bin in any of the features
             assert np.sum(np.subtract(ccpair, pypair)) <= 1
             assert np.isclose(alphas_py[(ref, other)], alphas_cpp[(ref, other)])
+
+def test_pdist_rot():
+    rotmats = []
+    
+    for _ in range(50):
+        angle = np.random.uniform(0, 2 * np.pi)
+        axis = np.random.uniform(size=3)
+        axis /= np.linalg.norm(axis)
+        rotmat = tf.rotation_matrix(angle, axis)
+        
+        rotmats.append(np.asfortranarray(rotmat[:3, :3]))
+    
+    dists_py = ppf.pdist_rot(rotmats)
+    dists_cc = ppf_fast.pdist_rot(rotmats)
+
+    print("python dists", dists_py)
+    print("c++ dists", dists_cc)
+    print(f"python side {rotmats[0].ctypes.data:x}")
+
+    print("lens", len(dists_py), len(dists_cc))
+    print("diff", np.sum(dists_py - dists_cc))
+
+    assert np.allclose(dists_py, dists_cc)

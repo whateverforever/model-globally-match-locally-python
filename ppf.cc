@@ -7,6 +7,7 @@
 
 #include <Eigen/Dense>
 
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <random>
@@ -132,9 +133,47 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
   return std::make_tuple(ppfs, ref2feature, model_alphas);
 }
 
+/* python's // operator */
+double divmod(double x, double y) { return (x - std::fmod(x, y)) / y; }
+
+double rotationBetween(const Eigen::Matrix3d &rotmatA,
+                       const Eigen::Matrix3d &rotmatB) {
+  const auto r_ab = rotmatA.transpose() * rotmatB;
+  return std::acos((r_ab.trace() - 1) / 2);
+}
+
+std::vector<uint8_t> pdistRot(const std::vector<Eigen::Matrix3d> &rot_mats) {
+  const auto m = rot_mats.size();
+  const auto idx = [&m](int i, int j) -> size_t {
+    return m * i + j - std::floor(((i + 2) * (i + 1)) / 2);
+  };
+  const auto rad2deg = [](const auto &rad) {
+    return rad / 3.141592653589793 * 180;
+  };
+
+  std::vector<uint8_t> dists(idx(m, m) + 1);
+  for (size_t idxA = 0; idxA < m; idxA++) {
+    for (size_t idxB = 0; idxB < m; idxB++) {
+      if (idxA == idxB) {
+        continue;
+      }
+      if (idxA > idxB) {
+        continue;
+      }
+
+      const uint8_t dist =
+          rad2deg(rotationBetween(rot_mats[idxA], rot_mats[idxB]));
+      dists[idx(idxA, idxB)] = dist;
+    }
+  }
+
+  return dists;
+}
+
 //////////////////////////////////////////////////////////// Bindings
 
 using nbMatX3 = nb::tensor<double, nb::shape<nb::any, 3>, nb::f_contig>;
+using nbMat3 = nb::tensor<double, nb::shape<3, 3>, nb::f_contig>;
 using nbVec3 = nb::tensor<double, nb::shape<3>, nb::f_contig>;
 
 const auto toMatX3 = [](const nbMatX3 &mat) {
@@ -189,4 +228,21 @@ NB_MODULE(ppf_fast, m) {
           return computeFeature(toVec3(vecA), toVec3(vecB), toVec3(normA),
                                 toVec3(normB), step_rad, step_dist);
         });
+
+  m.def("pdist_rot", [](const std::vector<nbMat3> &rot_mats) {
+    std::vector<Eigen::Matrix3d> rot_mats_eigen;
+    rot_mats_eigen.reserve(rot_mats.size());
+
+    std::transform(rot_mats.begin(), rot_mats.end(),
+                   std::back_inserter(rot_mats_eigen), [](const nbMat3 &mat) {
+                     return Eigen::Map<const Eigen::Matrix3d>(mat.data(), 3, 3);
+                   });
+    std::cout << "C++ side tensor=" << rot_mats[0].data() << "\n";
+    std::cout << "C++ side eigen =" << rot_mats_eigen[0].data() << "\n";
+
+    return pdistRot(rot_mats_eigen);
+  });
+
+  // std::vector<uint8_t> pdistRot(const std::vector<Eigen::Matrix3d> &rot_mats)
+  // {
 }
