@@ -199,8 +199,8 @@ def main():
 
                 alpha_disc = int(alpha // alpha_step)
                 accumulator[mA, alpha_disc] += 1
-                # accumulator[mA, (alpha_disc - 1) % args.alpha_num_angles] += 1
-                # accumulator[mA, (alpha_disc + 1) % args.alpha_num_angles] += 1
+                accumulator[mA, (alpha_disc - 1) % args.alpha_num_angles] += 1
+                accumulator[mA, (alpha_disc + 1) % args.alpha_num_angles] += 1
 
         peak_cutoff = np.max(accumulator) * 0.9
         idxs_peaks = np.argwhere(accumulator > peak_cutoff)
