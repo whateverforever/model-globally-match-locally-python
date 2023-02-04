@@ -7,6 +7,7 @@ Note: Currently, trimesh doesn't support pointcloud with normals. To combat this
       reconstruct some surface between the points (e.g. ball pivoting)
 """
 
+import zlib
 import random
 import time
 import argparse
@@ -454,7 +455,12 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
     # Combine the two clusterings, by creating new clusters
     # if two poses are in same cluster in loc and rot, they will be in new
     # common cluster (hash of both cluster ids)
-    pose_clusters = bernstein(dist_clusters, rot_clusters)
+    # pose_clusters = bernstein(dist_clusters, rot_clusters)
+
+    pose_clusters = [
+        zlib.adler32(f"{dist},{rot}".encode("ascii"))
+        for dist, rot in zip(dist_clusters, rot_clusters)
+    ]
 
     # remap the ludicrous hash values to range 0..num
     _, pose_clusters = np.unique(pose_clusters, return_inverse=True)
