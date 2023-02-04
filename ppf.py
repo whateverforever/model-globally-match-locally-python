@@ -164,7 +164,7 @@ def main():
     skipped_features = 0
 
     # discretization for the alpha rotation
-    alpha_step = np.radians(360 / args.alpha_num_angles)
+    alpha_step = np.radians(180 / args.alpha_num_angles)
 
     poses = []
     # accumulator we're going to reuse for each reference vert
