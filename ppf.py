@@ -67,6 +67,12 @@ def main():
         default=30,
         help="Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]",
     )
+    parser.add_argument(
+        "--cluster-max-rel-dist",
+        type=float,
+        default=1,
+        help="Maximal distance for candidate poses to be clustered together. Relative to object diameter.",
+    )
     args = parser.parse_args()
 
     if args.fast:
@@ -224,7 +230,7 @@ def main():
             R_alpha = tf.rotation_matrix(alpha_step * best_alpha, [1, 0, 0], [0, 0, 0])
             # TODO: invert homog
             T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
-            poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
+            poses.append((T_model2scene, accumulator[best_mr, best_alpha]))
 
     print(f"Got {len(poses)} poses after matching", " " * 20)
     print("Skipped", skipped_features, "scene pairs, not found in model")
@@ -232,7 +238,7 @@ def main():
     t_cluster_start = time.perf_counter()
     pose_clusters = cluster_poses(
         poses,
-        dist_max=modelscale * 0.5,
+        dist_max=modelscale * args.cluster_max_rel_dist,
         rot_max_deg=args.cluster_max_angle,
         pdist_rot=_pdist_rot,
     )
