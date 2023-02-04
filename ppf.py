@@ -31,6 +31,10 @@ def main():
     parser.add_argument("model", help="Path to the model pointcloud")
     parser.add_argument("scene", help="Path to the scene pointcloud")
     parser.add_argument(
+        "--model-vis",
+        help="Path to model mesh to use for visualization instead of pointcloud",
+    )
+    parser.add_argument(
         "--fast", action="store_true", help="Use the c++ extension for speeeeeed"
     )
     parser.add_argument(
@@ -105,11 +109,16 @@ def main():
             print("Fallback to open3d failed", e)
             quit()
 
+    if args.model_vis:
+        _model_vis = trimesh.load(args.model_vis)
+
     print("Model has", len(model.vertices), "vertices. scale=", model.scale)
     print("Scene has", len(scene.vertices), "vertices. scale=", scene.scale)
 
     # trimesh doesn't support .scale for point clouds
-    modelscale = np.linalg.norm(np.max(model.vertices, axis=0) - np.min(model.vertices, axis=0))
+    modelscale = np.linalg.norm(
+        np.max(model.vertices, axis=0) - np.min(model.vertices, axis=0)
+    )
     print("modelscale", modelscale)
 
     _model_vis.visual.vertex_colors = [[255, 0, 0, 255] for _ in _model_vis.vertices]
