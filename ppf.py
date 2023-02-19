@@ -64,13 +64,13 @@ def main():
     parser.add_argument(
         "--cluster-max-angle",
         type=float,
-        default=30,
+        default=12,
         help="Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]",
     )
     parser.add_argument(
         "--cluster-max-rel-dist",
         type=float,
-        default=1,
+        default=0.1,
         help="Maximal distance for candidate poses to be clustered together. Relative to object diameter.",
     )
     args = parser.parse_args()
@@ -101,6 +101,9 @@ def main():
 
             model = o3d.io.read_point_cloud(args.model)
             scene = o3d.io.read_point_cloud(args.scene)
+
+            model.estimate_normals()
+            scene.estimate_normals()
 
             model = trimesh.Trimesh(
                 np.asarray(model.points), vertex_normals=np.asarray(model.normals)
@@ -152,6 +155,16 @@ def main():
     )
     t_end = time.perf_counter()
     print(f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s")
+
+    features = np.array(list(ppfs_model.keys()))
+    print("Model features min/max", np.min(features, axis=0), np.max(features, axis=0))
+    fig, axs = plt.subplots(ncols=4)
+    axs[0].hist(features[:, 0])
+    axs[1].hist(features[:, 1])
+    axs[2].hist(features[:, 2])
+    axs[3].hist(features[:, 3])
+    fig.suptitle("Feature Component Histograms")
+    plt.show()
 
     ## 2. choose reference points in scene, compute their ppfs
     t_start = time.perf_counter()
@@ -207,9 +220,21 @@ def main():
                 accumulator[mA, alpha_disc] += 1
                 accumulator[mA, (alpha_disc - 1) % args.alpha_num_angles] += 1
                 accumulator[mA, (alpha_disc + 1) % args.alpha_num_angles] += 1
+        
+        # We kick out any model ref that doesn't have at least 10% of expected
+        # matches
+        where_lowscore = np.sum(accumulator, axis=1) < 0.1 * len(model.vertices) * 3
+        accumulator[where_lowscore] = 0
 
-        peak_cutoff = np.max(accumulator) * 0.9
-        idxs_peaks = np.argwhere(accumulator > peak_cutoff)
+        # NMS
+        # For each model ref, we only keep alpha with highest score
+        where_peak_neighbor = accumulator < np.max(accumulator, axis=1)[:, None]
+        accumulator[where_peak_neighbor] = 0
+
+        # We can take a high threshold here, because this step is per scene ref
+        # If we're left with a single candidate per reference vert, so be it
+        peak_cutoff = np.max(accumulator) * 0.95
+        idxs_peaks = np.argwhere((accumulator > peak_cutoff) & (accumulator > 0))
 
         s_r = scene.vertices[sA]
         s_normal = scene.vertex_normals[sA]
@@ -251,7 +276,7 @@ def main():
         [scene.vertices[idx] for idx in list(pairs_scene.keys())]
     )
     vis = trimesh.Scene([_scene_vis, scene_refs])
-    for T_model2scene, m_r, score in poses:
+    for T_model2scene, score in poses:
         model_vis = _model_vis.copy()
         color = (*np.random.randint(0, 255, size=3), 255)
         model_vis.visual.vertex_colors = [color for _ in model_vis.vertices]
@@ -449,9 +474,9 @@ def pdist_rot(rot_mats):
 
 
 def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
-    rots = np.array([T_m2s[:3, :3] for T_m2s, _, _ in poses])
-    locs = np.array([T_m2s[:3, 3] for T_m2s, _, _ in poses])
-    scores = np.array([score for _, _, score in poses])
+    rots = np.array([T_m2s[:3, :3] for T_m2s, _ in poses])
+    locs = np.array([T_m2s[:3, 3] for T_m2s, _ in poses])
+    pose_scores = np.array([score for _, score in poses])
 
     method = "centroid"
 
@@ -461,17 +486,13 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
     dist_clusters = fcluster(dist_dendro, dist_max, criterion="distance")
 
     # 2) cluster by rotations
-    # XXX optimize, we can make more smaller cluster problems, since
-    # a cluster across distant poses doesn't make sense
-    rot_dists = pdist_rot(rots)
+    rot_dists = pdist_rot(np.asfortranarray(rots))
     rot_dendor = linkage(rot_dists, method)
     rot_clusters = fcluster(rot_dendor, rot_max_deg, criterion="distance")
 
     # Combine the two clusterings, by creating new clusters
     # if two poses are in same cluster in loc and rot, they will be in new
     # common cluster (hash of both cluster ids)
-    # pose_clusters = bernstein(dist_clusters, rot_clusters)
-
     pose_clusters = [
         zlib.adler32(f"{dist},{rot}".encode("ascii"))
         for dist, rot in zip(dist_clusters, rot_clusters)
@@ -480,56 +501,90 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
     # remap the ludicrous hash values to range 0..num
     _, pose_clusters = np.unique(pose_clusters, return_inverse=True)
 
-    cluster_scores = np.zeros(np.max(pose_clusters) + 1)
-    for pose_score, pose_cluster in zip(scores, pose_clusters):
-        cluster_scores[pose_cluster] += pose_score
+    cluster_score = np.zeros_like(pose_clusters)
+    for pose_score, pose_cluster in zip(pose_scores, pose_clusters):
+        cluster_score[pose_cluster] += pose_score
 
-    best_cluster_idx = np.argmax(cluster_scores)
-    print(
-        "Best cluster",
-        best_cluster_idx,
-        cluster_scores[best_cluster_idx],
-        np.count_nonzero(pose_clusters == best_cluster_idx),
-    )
+    cluster_ts = defaultdict(list)
+    cluster_Rs = defaultdict(list)
+    cluster_size = defaultdict(int)
+    for pose_idx, cluster_idx in enumerate(pose_clusters):
+        cluster_ts[cluster_idx].append(locs[pose_idx])
+        cluster_Rs[cluster_idx].append(rots[pose_idx])
+        cluster_size[cluster_idx] += 1
 
-    plt.hist(cluster_scores, histtype="stepfilled", bins=100)
-    plt.title("Cluster Scores Histogram")
+    print("Info about top-10 clusters:")
+    for cluster_idx in np.argsort(cluster_score)[::-1][:10]:
+        print(
+            f"    cluster {cluster_idx} contains {cluster_size[cluster_idx]} poses, score={cluster_score[cluster_idx]}"
+        )
+
+    bins = 100
+    max_cluster_score = np.max(cluster_score)
+    cluster_score_step = max_cluster_score // bins
+    print("Using cluster score step of", cluster_score_step)
+
+    n_clusters4bin = defaultdict(int)
+    for score in cluster_score:
+        score_bin = score // cluster_score_step
+        n_clusters4bin[score_bin] += 1
+
+    # two scoring metrics
+    nclusters4score = lambda score: n_clusters4bin[score // cluster_score_step]
+    geomean = lambda x, y: np.sqrt(x * y)
+
+    cluster_geoscore = [
+        geomean(cluster_size[cluster_idx], cluster_score[cluster_idx])
+        for cluster_idx in pose_clusters
+    ]
+    cluster_uscore = [cluster_score[cluster_idx] ** 2 for cluster_idx in pose_clusters]
+
+    # XXX use third ingredient: number of clusters with similar score
+    # if high: bad
+
+    fig, axs = plt.subplots(ncols=3)
+    axs[0].hist(cluster_score, histtype="stepfilled", bins=100)
+    axs[0].set_yscale("log")
+    axs[0].set_title("Cluster Scores Histogram (Y-Axis logged)")
+    axs[1].hist(cluster_geoscore, histtype="stepfilled", bins=100)
+    axs[1].set_title("Combined score + number poses")
+    axs[2].hist(cluster_uscore, histtype="stepfilled", bins=100)
+    axs[2].set_title("Combined score with num cluster with that score (bin)")
     plt.show()
 
-    out_ts = defaultdict(list)
-    out_Rs = defaultdict(list)
-    for pose_idx, cluster_idx in enumerate(pose_clusters):
-        out_ts[cluster_idx].append(locs[pose_idx])
-        out_Rs[cluster_idx].append(rots[pose_idx])
+    best_cluster_idx = np.argmax(cluster_score)
+    # best_geo_score = geomean(
+    #     cluster_score[best_cluster_idx], cluster_size[best_cluster_idx]
+    # )
+    best_geo_score = cluster_score[best_cluster_idx]
+    best_rel_thresh = 0.8
 
-    sorted_clusters = np.argsort(cluster_scores)[::-1]
-
-    for idx_cluster, top_cluster in enumerate(sorted_clusters[:10]):
-        print(f"cluster {idx_cluster} contains {len(out_ts[top_cluster])} poses")
-
-    geo = lambda x, y: np.sqrt(x * y)
-
-    best_cluster_idx = np.argmax(cluster_scores)
-    best_score = cluster_scores[best_cluster_idx]
-    best_geo_score = geo(best_score, len(out_ts[best_cluster_idx]))
-    best_rel_thresh = 0.5
-
+    print("Info about final clusters:")
     out_poses = []
-    for cluster_idx in sorted_clusters:
-        geo_score = geo(len(out_ts[cluster_idx]), cluster_scores[cluster_idx])
+    for cluster_idx in set(pose_clusters):
+        ts, Rs, score, size = (
+            cluster_ts[cluster_idx],
+            cluster_Rs[cluster_idx],
+            cluster_score[cluster_idx],
+            cluster_size[cluster_idx],
+        )
+        # geo_score = geomean(score, size)
+        geo_score = score
         if geo_score < best_rel_thresh * best_geo_score:
             continue
 
-        print("cluster idx", cluster_idx, cluster_scores[cluster_idx], "geoscore", geo_score)
-        ts = out_ts[cluster_idx]
-        Rs = out_Rs[cluster_idx]
+        print(
+            "    cluster",
+            cluster_idx,
+            "plain score",
+            cluster_score[cluster_idx],
+            "geoscore",
+            int(geo_score),
+        )
 
-        avg_t = np.mean(ts, axis=0)
-        avg_R = average_rotations(Rs)
-        out_T = np.eye(4)
-        out_T[:3, :3] = avg_R[:3, :3]
-        out_T[:3, 3] = avg_t
-        out_poses.append((out_T, 0, geo_score))
+        out_T = average_rotations(Rs)
+        out_T[:3, 3] = np.mean(ts, axis=0)
+        out_poses.append((out_T, geo_score))
 
     print("Returning", len(out_poses), "clustered and averaged poses")
     return out_poses
