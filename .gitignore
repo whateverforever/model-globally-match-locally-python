@@ -6,3 +6,4 @@ build
 *.ppf
 *.poses
 *.npy
+.pytest_cache
