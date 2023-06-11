@@ -15,6 +15,7 @@ import itertools
 from collections import defaultdict
 
 import trimesh
+import trimesh.viewer
 import trimesh.transformations as tf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -140,7 +141,8 @@ def main():
     _scene_vis.visual.vertex_colors = (150, 200, 150, 240)
 
     vis = trimesh.Scene([_model_orig, _model_vis, _scene_vis])
-    vis.show()
+    vis.add_geometry(_model_orig, geom_name="pre_clustering0")
+    viewer = Viewer(vis)
 
     ## 1. compute ppfs of all vertex pairs in model, store in hash table
     angle_step = float(np.radians(360 / args.ppf_num_angles))
@@ -262,6 +264,7 @@ def main():
     print(f"Got {len(poses)} poses after matching", " " * 20)
     print("Skipped", skipped_features, "scene pairs, not found in model")
 
+    poses_orig = poses.copy()
     t_cluster_start = time.perf_counter()
     if not args.skip_clustering:
         poses = cluster_poses(
@@ -294,7 +297,16 @@ def main():
         print("Score", score)
         print(np.around(T_model2scene, decimals=2))
         print()
-    vis.show()
+
+    for T_model2scene, score in poses_orig:
+        color = (128, 128, 128)
+
+        model_vis = _model_vis.copy()
+        model_vis.visual.vertex_colors = color
+        model_vis.apply_transform(T_model2scene)
+        vis.add_geometry(model_vis, geom_name="pre_clustering")
+
+    viewer = Viewer(vis)
 
 
 def to_nanobind(arr):
@@ -618,6 +630,12 @@ def average_rotations(rotations):
 
 
 def average_rotations_so3(rotmats, n_steps=10):
+    """
+    Better average orientation by iteratively moving to the
+    mean orientation. Gives better results than the quaternion
+    method, when tested against global optimization using genetic algo.
+    """
+
     from scipy.spatial.transform import Rotation
 
     mat2vec = lambda mat: Rotation.from_matrix(mat[:3, :3]).as_rotvec()
@@ -633,6 +651,37 @@ def average_rotations_so3(rotmats, n_steps=10):
     out = np.eye(4)
     out[:3, :3] = vec2mat(vec)
     return out
+
+
+class Viewer(trimesh.viewer.SceneViewer):
+    TOGGLE_PRE_CLUSTER = ord("m")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, start_loop=False)
+
+        self.pre_cluster_visib = True
+
+        print("### Debug Viewer")
+        print("### To show/hide pre-cluster poses, press", chr(Viewer.TOGGLE_PRE_CLUSTER))
+
+        import pyglet
+
+        pyglet.app.run()
+
+    def on_key_press(self, symbol, modifiers):
+        if symbol == Viewer.TOGGLE_PRE_CLUSTER:
+            geoms = [
+                n for n in self.scene.graph.nodes if n.startswith("pre_cluster")
+            ]
+            for nodename in geoms:
+                if self.pre_cluster_visib:
+                    self.hide_geometry(nodename)
+                else:
+                    self.unhide_geometry(nodename)
+            self.pre_cluster_visib = not self.pre_cluster_visib
+
+        elif symbol == ord("q"):
+            super().on_key_press(symbol, modifiers)
 
 
 # Validation
