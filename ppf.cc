@@ -136,7 +136,8 @@ double divmod(double x, double y) { return (x - std::fmod(x, y)) / y; }
 double rotationBetween(const Eigen::Matrix3d &rotmatA,
                        const Eigen::Matrix3d &rotmatB) {
   const auto r_ab = rotmatA.transpose() * rotmatB;
-  return std::acos((r_ab.trace() - 1) / 2);
+  const auto val = (r_ab.trace() - 1) / 2;
+  return std::acos(std::clamp(val, -1.0, 1.0));
 }
 
 std::vector<uint8_t> pdistRot(const std::vector<Eigen::Matrix3d> &rot_mats) {
