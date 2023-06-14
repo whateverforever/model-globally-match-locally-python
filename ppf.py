@@ -15,7 +15,9 @@ import itertools
 from collections import defaultdict
 
 import trimesh
+import pyglet
 import trimesh.viewer
+import trimesh.creation
 import trimesh.transformations as tf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -108,7 +110,7 @@ def main():
             model = o3d.io.read_point_cloud(args.model)
             scene = o3d.io.read_point_cloud(args.scene)
 
-            model.estimate_normals()
+            # model.estimate_normals()
             # scene.estimate_normals()
 
             model = trimesh.Trimesh(
@@ -123,6 +125,12 @@ def main():
         except ImportError as e:
             print("Fallback to open3d failed", e)
             quit()
+    
+    model_normals = model.vertex_normals / np.linalg.norm(model.vertex_normals, axis=1)[:, None]
+    scene_normals = scene.vertex_normals / np.linalg.norm(scene.vertex_normals, axis=1)[:, None]
+
+    model = trimesh.Trimesh(model.vertices, vertex_normals=model_normals)
+    scene = trimesh.Trimesh(scene.vertices, vertex_normals=scene_normals)
 
     if args.model_vis:
         _model_vis = trimesh.load(args.model_vis)
@@ -245,21 +253,33 @@ def main():
 
         R_scene2glob = np.eye(4)
         R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
+        assert np.isclose(np.linalg.det(R_scene2glob), 1), np.linalg.det(R_scene2glob)
+
         T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
+        assert np.isclose(np.linalg.det(T_scene2glob), 1), np.linalg.det(T_scene2glob)
 
         for best_mr, best_alpha in idxs_peaks:
             R_model2glob = np.eye(4)
             R_model2glob[:3, :3] = align_vectors(
                 model.vertex_normals[best_mr], [1, 0, 0]
             )
+            assert np.isclose(np.linalg.det(R_model2glob), 1), np.linalg.det(R_model2glob)
+
             T_model2glob = R_model2glob @ tf.translation_matrix(
                 -model.vertices[best_mr]
             )
+            assert np.isclose(np.linalg.det(T_model2glob), 1), np.linalg.det(T_model2glob)
 
             R_alpha = tf.rotation_matrix(alpha_step * best_alpha, [1, 0, 0], [0, 0, 0])
             # TODO: invert homog
             T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
             poses.append((T_model2scene, accumulator[best_mr, best_alpha]))
+
+            if False:
+                tmp_scene = trimesh.Scene()
+                tmp_scene.add_geometry(_scene_vis, transform=T_scene2glob)
+                tmp_scene.add_geometry(_model_vis, transform=T_model2glob)
+                tmp_scene.show()
 
     print(f"Got {len(poses)} poses after matching", " " * 20)
     print("Skipped", skipped_features, "scene pairs, not found in model")
@@ -281,18 +301,18 @@ def main():
         [scene.vertices[idx] for idx in list(pairs_scene.keys())]
     )
     vis = trimesh.Scene([_scene_vis, scene_refs])
-    for T_model2scene, score in poses:
+    for idx, (T_model2scene, score) in enumerate(poses):
         color = (*np.random.randint(0, 255, size=3), 255)
 
         model_orig = _model_orig.copy()
         model_orig.visual.vertex_colors = color
         model_orig.apply_transform(T_model2scene)
-        vis.add_geometry(model_orig)
+        vis.add_geometry(model_orig, geom_name=f"match_pts_{idx}")
 
         model_vis = _model_vis.copy()
         model_vis.visual.vertex_colors = color
         model_vis.apply_transform(T_model2scene)
-        vis.add_geometry(model_vis)
+        vis.add_geometry(model_vis, geom_name=f"match_{idx}")
 
         print("Score", score)
         print(np.around(T_model2scene, decimals=2))
@@ -328,11 +348,13 @@ def vector_angle_signed_x(vecA, vecB):
 assert np.isclose(vector_angle_signed_x([0, 1, 0], [0, 0, 1]), np.pi / 2)
 assert np.isclose(vector_angle_signed_x([0, 0, 1], [0, 1, 0]), -np.pi / 2)
 
-
 def align_vectors(a, b):
     """
     Computes rotation matrix that rotates a into b
     """
+
+    assert np.isclose(np.linalg.norm(a), 1), np.linalg.norm(a)
+    assert np.isclose(np.linalg.norm(b), 1), np.linalg.norm(b)
 
     v = np.cross(a, b)
     c = np.dot(a, b)
@@ -578,9 +600,10 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
     # axs[2].set_title("Combined score with num cluster with that score (bin)")
     plt.show()
 
-    best_cluster_idx = np.argmax(cluster_harmscore)
+    # best_cluster_idx = np.argmax(cluster_harmscore)
+    best_cluster_idx = np.argmax(cluster_score)
     best_geo_score = cluster_harmscore[best_cluster_idx]
-    best_rel_thresh = 0.5
+    best_rel_thresh = 0.8
 
     print(f"Best score={best_geo_score}, min_needed={best_rel_thresh * best_geo_score}")
     print("Info about final clusters:")
@@ -594,7 +617,8 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
         )
         geo_score = cluster_harmscore[cluster_idx]
         # geo_score = score
-        if geo_score < best_rel_thresh * best_geo_score:
+        # if geo_score < best_rel_thresh * best_geo_score:
+        if score < best_rel_thresh * cluster_score[best_cluster_idx]:
             print(f"    Discarding cluster {cluster_idx}, score={geo_score}")
             continue
 
@@ -654,17 +678,25 @@ def average_rotations_so3(rotmats, n_steps=10):
 
 
 class Viewer(trimesh.viewer.SceneViewer):
-    TOGGLE_PRE_CLUSTER = ord("m")
+    TOGGLE_PRE_CLUSTER = ord("i")
+    TOGGLE_MATCHES = ord("m")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, start_loop=False)
 
         self.pre_cluster_visib = True
+        self.matches_visib = True
+        self.labels = []
 
         print("### Debug Viewer")
         print("### To show/hide pre-cluster poses, press", chr(Viewer.TOGGLE_PRE_CLUSTER))
 
-        import pyglet
+        label = pyglet.text.Label('Hello, world',
+                                font_name='Times New Roman',
+                                font_size=36,
+                                x=100, y=100,
+                                anchor_x='center', anchor_y='center')
+        self.labels.append(label)
 
         pyglet.app.run()
 
@@ -680,8 +712,25 @@ class Viewer(trimesh.viewer.SceneViewer):
                     self.unhide_geometry(nodename)
             self.pre_cluster_visib = not self.pre_cluster_visib
 
+        elif symbol == Viewer.TOGGLE_MATCHES:
+            geoms = [
+                n for n in self.scene.graph.nodes if n.startswith("match")
+            ]
+            for nodename in geoms:
+                if self.matches_visib:
+                    self.hide_geometry(nodename)
+                else:
+                    self.unhide_geometry(nodename)
+            self.matches_visib = not self.matches_visib
+
         elif symbol == ord("q"):
             super().on_key_press(symbol, modifiers)
+    
+    def on_draw(self):
+        super().on_draw()
+
+        for label in self.labels:
+            label.draw()
 
 
 # Validation
