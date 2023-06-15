@@ -7,7 +7,6 @@ Note: Currently, trimesh doesn't support pointcloud with normals. To combat this
       reconstruct some surface between the points (e.g. ball pivoting)
 """
 
-import zlib
 import random
 import time
 import argparse
@@ -71,13 +70,13 @@ def main():
     parser.add_argument(
         "--cluster-max-angle",
         type=float,
-        default=12,
+        default=30,
         help="Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]",
     )
     parser.add_argument(
         "--cluster-max-rel-dist",
         type=float,
-        default=0.1,
+        default=0.25,
         help="Maximal distance for candidate poses to be clustered together. Relative to object diameter.",
     )
     args = parser.parse_args()
@@ -599,7 +598,6 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vi
         # if geo_score < best_rel_thresh * best_geo_score:
         geo_score = score
         if score < best_rel_thresh * cluster_score[best_cluster_idx]:
-            print(f"    Discarding cluster {cluster_idx}, score={geo_score}")
             continue
 
         print(
@@ -630,6 +628,8 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vi
         assert np.isclose(np.linalg.det(out_T), 1), np.linalg.det(out_T)
         out_poses.append((out_T, geo_score))
 
+    # XXX todo: after clustering, cluster again on the surviving parts,
+    # this time ignoring orientation, in order to merge symmetric objs
 
     print("Returning", len(out_poses), "clustered and averaged poses")
     return out_poses
