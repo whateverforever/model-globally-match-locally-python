@@ -76,11 +76,6 @@ def main():
         default=0.1,
         help="Maximal distance for candidate poses to be clustered together. Relative to object diameter.",
     )
-    parser.add_argument(
-        "--skip-clustering",
-        action="store_true",
-        help="Whether to not cluster at all and simply returns all matches",
-    )
     args = parser.parse_args()
 
     if args.fast:
@@ -125,9 +120,13 @@ def main():
         except ImportError as e:
             print("Fallback to open3d failed", e)
             quit()
-    
-    model_normals = model.vertex_normals / np.linalg.norm(model.vertex_normals, axis=1)[:, None]
-    scene_normals = scene.vertex_normals / np.linalg.norm(scene.vertex_normals, axis=1)[:, None]
+
+    model_normals = (
+        model.vertex_normals / np.linalg.norm(model.vertex_normals, axis=1)[:, None]
+    )
+    scene_normals = (
+        scene.vertex_normals / np.linalg.norm(scene.vertex_normals, axis=1)[:, None]
+    )
 
     model = trimesh.Trimesh(model.vertices, vertex_normals=model_normals)
     scene = trimesh.Trimesh(scene.vertices, vertex_normals=scene_normals)
@@ -263,12 +262,16 @@ def main():
             R_model2glob[:3, :3] = align_vectors(
                 model.vertex_normals[best_mr], [1, 0, 0]
             )
-            assert np.isclose(np.linalg.det(R_model2glob), 1), np.linalg.det(R_model2glob)
+            assert np.isclose(np.linalg.det(R_model2glob), 1), np.linalg.det(
+                R_model2glob
+            )
 
             T_model2glob = R_model2glob @ tf.translation_matrix(
                 -model.vertices[best_mr]
             )
-            assert np.isclose(np.linalg.det(T_model2glob), 1), np.linalg.det(T_model2glob)
+            assert np.isclose(np.linalg.det(T_model2glob), 1), np.linalg.det(
+                T_model2glob
+            )
 
             R_alpha = tf.rotation_matrix(alpha_step * best_alpha, [1, 0, 0], [0, 0, 0])
             # TODO: invert homog
@@ -303,31 +306,20 @@ def main():
     )
     vis = trimesh.Scene([_scene_vis, scene_refs])
     for idx, (T_model2scene, score) in enumerate(poses):
-        color = (*np.random.randint(0, 255, size=3), 255)
-
-        model_orig = _model_orig.copy()
-        model_orig.visual.vertex_colors = color
-        model_orig.apply_transform(T_model2scene)
-        vis.add_geometry(model_orig, geom_name=f"match_pts_{idx}")
-
-        model_vis = _model_vis.copy()
-        model_vis.visual.vertex_colors = color
-        model_vis.apply_transform(T_model2scene)
-        vis.add_geometry(model_vis, geom_name=f"match_{idx}")
+        vis.add_geometry(_model_orig, transform=T_model2scene, geom_name=f"match_pts_{idx}")
+        vis.add_geometry(_model_vis, transform=T_model2scene, geom_name=f"match_{idx}")
 
         print("Score", score)
         print(np.around(T_model2scene, decimals=2))
         print()
 
+    prior_model = _model_vis.copy()
+    prior_model.visual.vertex_colors = (128, 128, 128)
     for T_model2scene, score in poses_orig:
-        color = (128, 128, 128)
-
-        model_vis = _model_vis.copy()
-        model_vis.visual.vertex_colors = color
-        model_vis.apply_transform(T_model2scene)
-        vis.add_geometry(model_vis, geom_name="pre_clustering")
-
-    viewer = Viewer(vis)
+        vis.add_geometry(
+            prior_model, transform=T_model2scene, geom_name="pre_clustering"
+        )
+    Viewer(vis)
 
 
 def to_nanobind(arr):
@@ -348,6 +340,7 @@ def vector_angle_signed_x(vecA, vecB):
 
 assert np.isclose(vector_angle_signed_x([0, 1, 0], [0, 0, 1]), np.pi / 2)
 assert np.isclose(vector_angle_signed_x([0, 0, 1], [0, 1, 0]), -np.pi / 2)
+
 
 def align_vectors(a, b):
     """
@@ -533,7 +526,6 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vi
         int(''.join(f'{ord(char)}' for char in f"{dist},{rot}"))
         for dist, rot in zip(dist_clusters, rot_clusters)
     ]
-    
 
     # remap the ludicrous hash values to range 0..num
     _, pose_clusters = np.unique(pose_clusters, return_inverse=True)
