@@ -150,7 +150,6 @@ def main():
 
     _model_orig.visual.vertex_colors = (255, 0, 0, 255)
     _model_vis.visual.vertex_colors = (255, 0, 0, 255)
-    _scene_vis.visual.vertex_colors = (150, 200, 150, 240)
 
     vis = trimesh.Scene([_model_orig, _model_vis, _scene_vis])
     vis.add_geometry(_model_orig, geom_name="pre_clustering0")
@@ -582,7 +581,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vi
     # best_cluster_idx = np.argmax(cluster_harmscore)
     best_cluster_idx = np.argmax(cluster_score)
     best_geo_score = cluster_harmscore[best_cluster_idx]
-    best_rel_thresh = 0.5
+    best_rel_thresh = 0.6
 
     print(f"Best score={best_geo_score}, min_needed={best_rel_thresh * best_geo_score}")
     print("Info about final clusters:")
@@ -609,22 +608,19 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vi
             geo_score,
         )
 
-        sc = trimesh.Scene([_scene_vis])
-        model = _model_vis.copy()
-        model.visual.vertex_colors = (255, 255, 0, 128)
+        #sc = trimesh.Scene([_scene_vis])
+        #model = _model_vis.copy()
+        #model.visual.vertex_colors = (255, 255, 0, 128)
         for R, t in zip(Rs, ts):
             T = np.eye(4)
             T[:3, :3] = R
             T[:3, 3] = t
-
-            sc.add_geometry(model, transform=T)
+            # sc.add_geometry(model, transform=T)
 
         out_T = average_rotations(Rs)
         out_T[:3, 3] = np.mean(ts, axis=0)
-        
-        sc.add_geometry(_model_vis, transform=out_T)
-        sc.show()
-
+        #sc.add_geometry(_model_vis, transform=out_T)
+        #sc.show()
         assert np.isclose(np.linalg.det(out_T), 1), np.linalg.det(out_T)
         out_poses.append((out_T, geo_score))
 
