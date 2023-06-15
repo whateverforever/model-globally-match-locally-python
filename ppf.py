@@ -284,15 +284,16 @@ def main():
     print(f"Got {len(poses)} poses after matching", " " * 20)
     print("Skipped", skipped_features, "scene pairs, not found in model")
 
-    poses_orig = poses.copy()
+    poses_orig = poses[:100].copy()
     t_cluster_start = time.perf_counter()
-    if not args.skip_clustering:
-        poses = cluster_poses(
-            poses,
-            dist_max=model_diag * args.cluster_max_rel_dist,
-            rot_max_deg=args.cluster_max_angle,
-            pdist_rot=_pdist_rot,
-        )
+    poses = cluster_poses(
+        poses,
+        dist_max=model_diag * args.cluster_max_rel_dist,
+        rot_max_deg=args.cluster_max_angle,
+        pdist_rot=_pdist_rot,
+        _scene_vis=_scene_vis,
+        _model_vis=_model_vis
+    )
     t_cluster_end = time.perf_counter()
     print(f"Clustering took {t_cluster_end - t_cluster_start:.1f}s")
 
@@ -508,7 +509,7 @@ def pdist_rot(rot_mats):
     return dists.astype(float)
 
 
-def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
+def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vis=None, _model_vis=None):
     rots = np.array([T_m2s[:3, :3] for T_m2s, _ in poses])
     locs = np.array([T_m2s[:3, 3] for T_m2s, _ in poses])
     pose_scores = np.array([score for _, score in poses])
@@ -522,16 +523,17 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
 
     # 2) cluster by rotations
     rot_dists = pdist_rot(np.asfortranarray(rots))
-    rot_dendor = linkage(rot_dists, method)
-    rot_clusters = fcluster(rot_dendor, rot_max_deg, criterion="distance")
+    rot_dendro = linkage(rot_dists, method)
+    rot_clusters = fcluster(rot_dendro, rot_max_deg, criterion="distance")
 
     # Combine the two clusterings, by creating new clusters
     # if two poses are in same cluster in loc and rot, they will be in new
     # common cluster (hash of both cluster ids)
     pose_clusters = [
-        zlib.adler32(f"{dist},{rot}".encode("ascii"))
+        int(''.join(f'{ord(char)}' for char in f"{dist},{rot}"))
         for dist, rot in zip(dist_clusters, rot_clusters)
     ]
+    
 
     # remap the ludicrous hash values to range 0..num
     _, pose_clusters = np.unique(pose_clusters, return_inverse=True)
@@ -554,38 +556,18 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
             f"    cluster {cluster_idx} contains {cluster_size[cluster_idx]} poses, score={cluster_score[cluster_idx]}"
         )
 
-    bins = 100
-    max_cluster_score = np.max(cluster_score)
-    cluster_score_step = max_cluster_score // bins
-    print("Using cluster score step of", cluster_score_step)
-
-    n_clusters4bin = defaultdict(int)
-    for score in cluster_score:
-        score_bin = score // cluster_score_step
-        n_clusters4bin[score_bin] += 1
-
-    # two scoring metrics
-    nclusters4score = lambda score: n_clusters4bin[score // cluster_score_step]
     geomean = lambda x, y: np.sqrt(x * y)
     harmmean = lambda x, y: 2 / (1 / (x + 1e-8) + 1 / (y + 1e-8))
-
-    max_size = np.max(list(cluster_size.values()))
-    max_score = np.max(cluster_score)
 
     cluster_geoscore = [
         geomean(cluster_size[cluster_idx], cluster_score[cluster_idx])
         for cluster_idx in pose_clusters
     ]
     cluster_harmscore = [
-        harmmean(
-            cluster_size[cluster_idx] / max_size, cluster_score[cluster_idx] / max_score
-        )
+        harmmean(cluster_size[cluster_idx], cluster_score[cluster_idx])
         for cluster_idx in pose_clusters
     ]
     cluster_uscore = [cluster_score[cluster_idx] ** 2 for cluster_idx in pose_clusters]
-
-    # XXX use third ingredient: number of clusters with similar score
-    # if high: bad
 
     fig, axs = plt.subplots(ncols=3)
     axs[0].hist(cluster_score, histtype="stepfilled", bins=100)
@@ -603,7 +585,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
     # best_cluster_idx = np.argmax(cluster_harmscore)
     best_cluster_idx = np.argmax(cluster_score)
     best_geo_score = cluster_harmscore[best_cluster_idx]
-    best_rel_thresh = 0.8
+    best_rel_thresh = 0.5
 
     print(f"Best score={best_geo_score}, min_needed={best_rel_thresh * best_geo_score}")
     print("Info about final clusters:")
@@ -615,9 +597,9 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
             cluster_score[cluster_idx],
             cluster_size[cluster_idx],
         )
-        geo_score = cluster_harmscore[cluster_idx]
-        # geo_score = score
+        # geo_score = cluster_harmscore[cluster_idx]
         # if geo_score < best_rel_thresh * best_geo_score:
+        geo_score = score
         if score < best_rel_thresh * cluster_score[best_cluster_idx]:
             print(f"    Discarding cluster {cluster_idx}, score={geo_score}")
             continue
@@ -631,9 +613,25 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
             geo_score,
         )
 
-        out_T = average_rotations_so3(Rs)
+        sc = trimesh.Scene([_scene_vis])
+        model = _model_vis.copy()
+        model.visual.vertex_colors = (255, 255, 0, 128)
+        for R, t in zip(Rs, ts):
+            T = np.eye(4)
+            T[:3, :3] = R
+            T[:3, 3] = t
+
+            sc.add_geometry(model, transform=T)
+
+        out_T = average_rotations(Rs)
         out_T[:3, 3] = np.mean(ts, axis=0)
+        
+        sc.add_geometry(_model_vis, transform=out_T)
+        sc.show()
+
+        assert np.isclose(np.linalg.det(out_T), 1), np.linalg.det(out_T)
         out_poses.append((out_T, geo_score))
+
 
     print("Returning", len(out_poses), "clustered and averaged poses")
     return out_poses
@@ -686,25 +684,17 @@ class Viewer(trimesh.viewer.SceneViewer):
 
         self.pre_cluster_visib = True
         self.matches_visib = True
-        self.labels = []
 
         print("### Debug Viewer")
-        print("### To show/hide pre-cluster poses, press", chr(Viewer.TOGGLE_PRE_CLUSTER))
-
-        label = pyglet.text.Label('Hello, world',
-                                font_name='Times New Roman',
-                                font_size=36,
-                                x=100, y=100,
-                                anchor_x='center', anchor_y='center')
-        self.labels.append(label)
-
+        print(
+            "### To show/hide pre-cluster poses, press", chr(Viewer.TOGGLE_PRE_CLUSTER)
+        )
+        print("### To show/hide matches, press", chr(Viewer.TOGGLE_MATCHES))
         pyglet.app.run()
 
     def on_key_press(self, symbol, modifiers):
         if symbol == Viewer.TOGGLE_PRE_CLUSTER:
-            geoms = [
-                n for n in self.scene.graph.nodes if n.startswith("pre_cluster")
-            ]
+            geoms = [n for n in self.scene.graph.nodes if n.startswith("pre_cluster")]
             for nodename in geoms:
                 if self.pre_cluster_visib:
                     self.hide_geometry(nodename)
@@ -713,9 +703,7 @@ class Viewer(trimesh.viewer.SceneViewer):
             self.pre_cluster_visib = not self.pre_cluster_visib
 
         elif symbol == Viewer.TOGGLE_MATCHES:
-            geoms = [
-                n for n in self.scene.graph.nodes if n.startswith("match")
-            ]
+            geoms = [n for n in self.scene.graph.nodes if n.startswith("match")]
             for nodename in geoms:
                 if self.matches_visib:
                     self.hide_geometry(nodename)
@@ -725,12 +713,6 @@ class Viewer(trimesh.viewer.SceneViewer):
 
         elif symbol == ord("q"):
             super().on_key_press(symbol, modifiers)
-    
-    def on_draw(self):
-        super().on_draw()
-
-        for label in self.labels:
-            label.draw()
 
 
 # Validation
