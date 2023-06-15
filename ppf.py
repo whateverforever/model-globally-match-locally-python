@@ -38,6 +38,10 @@ def main():
         help="Path to model mesh to use for visualization instead of pointcloud",
     )
     parser.add_argument(
+        "--scene-vis",
+        help="Path to scene mesh to use for visualization instead of pointcloud"
+    )
+    parser.add_argument(
         "--fast", action="store_true", help="Use the c++ extension for speeeeeed"
     )
     parser.add_argument(
@@ -133,6 +137,8 @@ def main():
 
     if args.model_vis:
         _model_vis = trimesh.load(args.model_vis)
+    if args.scene_vis:
+        _scene_vis = trimesh.load(args.scene_vis)
 
     print("Model has", len(model.vertices), "vertices. scale=", model.scale)
     print("Scene has", len(scene.vertices), "vertices. scale=", scene.scale)
@@ -319,7 +325,7 @@ def main():
         vis.add_geometry(
             prior_model, transform=T_model2scene, geom_name="pre_clustering"
         )
-    Viewer(vis)
+    Viewer(vis, line_settings={'point_size':10})
 
 
 def to_nanobind(arr):
