@@ -631,12 +631,37 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vi
         #sc.show()
         assert np.isclose(np.linalg.det(out_T), 1), np.linalg.det(out_T)
         out_poses.append((out_T, geo_score))
-
-    # XXX todo: after clustering, cluster again on the surviving parts,
-    # this time ignoring orientation, in order to merge symmetric objs
+    
+    # Do non-max-suppression to remove symmetric instances, or simply
+    # duplicates
+    out_poses = nms(out_poses, dist_max=dist_max * 2)
 
     print("Returning", len(out_poses), "clustered and averaged poses")
     return out_poses
+
+
+def nms(poses_and_scores, dist_max):
+    if len(poses_and_scores) == 1:
+        return poses_and_scores
+
+    poses_and_scores = np.array(poses_and_scores, dtype=object)
+
+    dist_dists = pdist([T_m2s[:3, 3] for T_m2s, _ in poses_and_scores])
+    dist_dendro = linkage(dist_dists, "centroid")
+    dist_clusters = fcluster(dist_dendro, dist_max, criterion="distance")
+
+    suppressed = []
+    for cluster in np.unique(dist_clusters):
+        cluster_items = poses_and_scores[dist_clusters == cluster]
+        cluster_scores = [score for pose, score in cluster_items]
+        cluster_poses = [pose for pose, score in cluster_items]
+
+        best_idx_in_clust = np.argmax(cluster_scores)
+        best_score_in_clust = cluster_scores[best_idx_in_clust]
+        best_pose_in_clust = cluster_poses[best_idx_in_clust]
+        suppressed.append((best_pose_in_clust, best_score_in_clust))
+
+    return suppressed
 
 
 def average_rotations(rotations):
@@ -651,30 +676,6 @@ def average_rotations(rotations):
     quat_avg = v[:, -1]
 
     return tf.quaternion_matrix(quat_avg)
-
-
-def average_rotations_so3(rotmats, n_steps=10):
-    """
-    Better average orientation by iteratively moving to the
-    mean orientation. Gives better results than the quaternion
-    method, when tested against global optimization using genetic algo.
-    """
-
-    from scipy.spatial.transform import Rotation
-
-    mat2vec = lambda mat: Rotation.from_matrix(mat[:3, :3]).as_rotvec()
-    vec2mat = lambda vec: Rotation.from_rotvec(vec).as_matrix()
-
-    rotvecs = np.array([mat2vec(mat) for mat in rotmats])
-    vec = [0, 0, 0]
-
-    for _ in range(n_steps):
-        diffvecs = rotvecs - vec
-        vec += np.mean(diffvecs, axis=0)
-
-    out = np.eye(4)
-    out[:3, :3] = vec2mat(vec)
-    return out
 
 
 class Viewer(trimesh.viewer.SceneViewer):
