@@ -4,6 +4,8 @@
 > by Drost. et al (2010) [[paper]](https://campar.in.tum.de/pub/drost2010CVPR/drost2010CVPR.pdf).
 >
 > Use the `--fast` flag to use the binary extension (see instructions below)
+>
+> Please note that the algorithm has been [patented by MVTec GmbH](https://patents.google.com/patent/EP2385483B1/).
 
 ![Screenshots of a model and scene before matching and after matching with PPF-Voting.](screenshot.png)
 

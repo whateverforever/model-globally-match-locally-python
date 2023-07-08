@@ -14,6 +14,9 @@ import itertools
 from collections import defaultdict
 
 import trimesh
+import pyglet
+import trimesh.viewer
+import trimesh.creation
 import trimesh.transformations as tf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -29,6 +32,14 @@ def main():
     )
     parser.add_argument("model", help="Path to the model pointcloud")
     parser.add_argument("scene", help="Path to the scene pointcloud")
+    parser.add_argument(
+        "--model-vis",
+        help="Path to model mesh to use for visualization instead of pointcloud",
+    )
+    parser.add_argument(
+        "--scene-vis",
+        help="Path to scene mesh to use for visualization instead of pointcloud"
+    )
     parser.add_argument(
         "--fast", action="store_true", help="Use the c++ extension for speeeeeed"
     )
@@ -62,6 +73,12 @@ def main():
         default=30,
         help="Maximal angle between poses after which they don't belong to same cluster anymore. [degrees]",
     )
+    parser.add_argument(
+        "--cluster-max-rel-dist",
+        type=float,
+        default=0.25,
+        help="Maximal distance for candidate poses to be clustered together. Relative to object diameter.",
+    )
     args = parser.parse_args()
 
     if args.fast:
@@ -79,7 +96,7 @@ def main():
     scene = trimesh.load(args.scene)
 
     if hasattr(model, "vertex_normals") and hasattr(scene, "vertex_normals"):
-        _model_vis = model.copy()
+        _model_orig = model.copy()
         _scene_vis = scene.copy()
     else:
         try:
@@ -91,6 +108,9 @@ def main():
             model = o3d.io.read_point_cloud(args.model)
             scene = o3d.io.read_point_cloud(args.scene)
 
+            # model.estimate_normals()
+            # scene.estimate_normals()
+
             model = trimesh.Trimesh(
                 np.asarray(model.points), vertex_normals=np.asarray(model.normals)
             )
@@ -98,33 +118,47 @@ def main():
                 np.asarray(scene.points), vertex_normals=np.asarray(scene.normals)
             )
 
-            _model_vis = trimesh.PointCloud(vertices=model.vertices)
+            _model_orig = trimesh.PointCloud(vertices=model.vertices)
             _scene_vis = trimesh.PointCloud(vertices=scene.vertices)
         except ImportError as e:
             print("Fallback to open3d failed", e)
             quit()
 
+    model_normals = (
+        model.vertex_normals / np.linalg.norm(model.vertex_normals, axis=1)[:, None]
+    )
+    scene_normals = (
+        scene.vertex_normals / np.linalg.norm(scene.vertex_normals, axis=1)[:, None]
+    )
+
+    model = trimesh.Trimesh(model.vertices, vertex_normals=model_normals)
+    scene = trimesh.Trimesh(scene.vertices, vertex_normals=scene_normals)
+
+    if args.model_vis:
+        _model_vis = trimesh.load(args.model_vis)
+    if args.scene_vis:
+        _scene_vis = trimesh.load(args.scene_vis)
+
     print("Model has", len(model.vertices), "vertices. scale=", model.scale)
     print("Scene has", len(scene.vertices), "vertices. scale=", scene.scale)
 
     # trimesh doesn't support .scale for point clouds
-    modelscale = np.linalg.norm(np.max(model.vertices, axis=0) - np.min(model.vertices, axis=0))
-    print("modelscale", modelscale)
+    model_diag = np.linalg.norm(
+        np.max(model.vertices, axis=0) - np.min(model.vertices, axis=0)
+    )
+    print("modelscale", model_diag)
 
-    _model_vis.visual.vertex_colors = [[255, 0, 0, 255] for _ in _model_vis.vertices]
-    _scene_vis.visual.vertex_colors = [
-        [150, 200, 150, 240] for _ in _scene_vis.vertices
-    ]
+    _model_orig.visual.vertex_colors = (255, 0, 0, 255)
+    _model_vis.visual.vertex_colors = (255, 0, 0, 255)
 
-    plt.figure()
-    plt.show()
-
-    vis = trimesh.Scene([_model_vis, _scene_vis])
-    vis.show()
+    vis = trimesh.Scene([_model_orig, _model_vis, _scene_vis])
+    vis.add_geometry(_model_orig, geom_name="pre_clustering0")
+    viewer = Viewer(vis)
 
     ## 1. compute ppfs of all vertex pairs in model, store in hash table
-    angle_step = float(np.radians(360 / args.ppf_num_angles))
-    dist_step = args.ppf_rel_dist_step * modelscale
+    angle_step = float(np.deg2rad(360 / args.ppf_num_angles))
+    dist_step = args.ppf_rel_dist_step * model_diag
+    print(f"angle_step={np.rad2deg(angle_step):.1f}d dist_step={dist_step:.2f}")
 
     print("Computing model ppfs features")
     t_start = time.perf_counter()
@@ -137,6 +171,16 @@ def main():
     t_end = time.perf_counter()
     print(f"Computing ppfs for {len(model.vertices)} verts took {t_end - t_start:.2f}s")
 
+    features = np.array(list(ppfs_model.keys()))
+    print("Model features min/max", np.min(features, axis=0), np.max(features, axis=0))
+    fig, axs = plt.subplots(ncols=4)
+    axs[0].hist(features[:, 0])
+    axs[1].hist(features[:, 1])
+    axs[2].hist(features[:, 2])
+    axs[3].hist(features[:, 3])
+    fig.suptitle("Feature Component Histograms")
+    plt.show()
+
     ## 2. choose reference points in scene, compute their ppfs
     t_start = time.perf_counter()
     _, pairs_scene, scene_alphas = _compute_ppf(
@@ -144,7 +188,7 @@ def main():
         to_nanobind(scene.vertex_normals),
         angle_step,
         dist_step,
-        max_dist=modelscale,
+        max_dist=model_diag,
         ref_fraction=args.scene_pts_fraction,
     )
     t_end = time.perf_counter()
@@ -182,71 +226,137 @@ def main():
 
             alpha_s = scene_alphas[(sA, sB)]
 
+            # Pavel Zednik non-planar voting scheme. Ideally this
+            # would be computed ahead of time, before the feature
+            # gets discretized
+            dot = np.cos(s_feature[-1] * angle_step)
+            vote = 1 - np.abs(dot)
+
             for m_pair in ppfs_model[s_feature]:
                 mA, mB = m_pair
                 alpha_m = model_alphas[m_pair]
                 alpha = alpha_m - alpha_s
 
                 alpha_disc = int(alpha // alpha_step)
-                accumulator[mA, alpha_disc] += 1
-                # accumulator[mA, (alpha_disc - 1) % args.alpha_num_angles] += 1
-                # accumulator[mA, (alpha_disc + 1) % args.alpha_num_angles] += 1
 
-        peak_cutoff = np.max(accumulator) * 0.9
-        idxs_peaks = np.argwhere(accumulator > peak_cutoff)
+                # Hinterstoisser accumulator smoothing
+                accumulator[mA, alpha_disc] += vote
+                accumulator[mA, (alpha_disc - 1) % args.alpha_num_angles] += vote
+                accumulator[mA, (alpha_disc + 1) % args.alpha_num_angles] += vote
+
+        # We kick out any model ref that doesn't have at least 10% of expected
+        # matches
+        where_lowscore = np.sum(accumulator, axis=1) < 0.1 * len(model.vertices) * 3
+        accumulator[where_lowscore] = 0
+
+        # NMS
+        # For each model ref, we only keep alpha with highest score
+        where_peak_neighbor = accumulator < np.max(accumulator, axis=1)[:, None]
+        accumulator[where_peak_neighbor] = 0
+
+        # We can take a high threshold here, because this step is per scene ref
+        # If we're left with a single candidate per reference vert, so be it
+        peak_cutoff = np.max(accumulator) * 0.95
+        idxs_peaks = np.argwhere((accumulator > peak_cutoff) & (accumulator > 0))
 
         s_r = scene.vertices[sA]
         s_normal = scene.vertex_normals[sA]
 
         R_scene2glob = np.eye(4)
         R_scene2glob[:3, :3] = align_vectors(s_normal, [1, 0, 0])
+        assert np.isclose(np.linalg.det(R_scene2glob), 1), np.linalg.det(R_scene2glob)
+
         T_scene2glob = R_scene2glob @ tf.translation_matrix(-s_r)
+        assert np.isclose(np.linalg.det(T_scene2glob), 1), np.linalg.det(T_scene2glob)
 
         for best_mr, best_alpha in idxs_peaks:
             R_model2glob = np.eye(4)
             R_model2glob[:3, :3] = align_vectors(
                 model.vertex_normals[best_mr], [1, 0, 0]
             )
+            assert np.isclose(np.linalg.det(R_model2glob), 1), np.linalg.det(
+                R_model2glob
+            )
+
             T_model2glob = R_model2glob @ tf.translation_matrix(
                 -model.vertices[best_mr]
+            )
+            assert np.isclose(np.linalg.det(T_model2glob), 1), np.linalg.det(
+                T_model2glob
             )
 
             R_alpha = tf.rotation_matrix(alpha_step * best_alpha, [1, 0, 0], [0, 0, 0])
             # TODO: invert homog
             T_model2scene = np.linalg.inv(T_scene2glob) @ R_alpha @ T_model2glob
-            poses.append((T_model2scene, best_mr, accumulator[best_mr, best_alpha]))
+            poses.append((T_model2scene, accumulator[best_mr, best_alpha]))
+
+            if False:
+                tmp_scene = trimesh.Scene()
+                tmp_scene.add_geometry(_scene_vis, transform=T_scene2glob)
+                tmp_scene.add_geometry(_model_vis, transform=T_model2glob)
+                tmp_scene.show()
 
     print(f"Got {len(poses)} poses after matching", " " * 20)
     print("Skipped", skipped_features, "scene pairs, not found in model")
 
+    poses_orig = poses[:100].copy()
     t_cluster_start = time.perf_counter()
-    pose_clusters = cluster_poses(
+    poses = cluster_poses(
         poses,
-        dist_max=modelscale * 0.5,
+        dist_max=model_diag * args.cluster_max_rel_dist,
         rot_max_deg=args.cluster_max_angle,
         pdist_rot=_pdist_rot,
+        _scene_vis=_scene_vis,
+        _model_vis=_model_vis
     )
-    poses = pose_clusters
     t_cluster_end = time.perf_counter()
     print(f"Clustering took {t_cluster_end - t_cluster_start:.1f}s")
+
+    poses = verify_poses(poses, scene, model, dist_step/2)
 
     ## Visualize result
     scene_refs = trimesh.PointCloud(
         [scene.vertices[idx] for idx in list(pairs_scene.keys())]
     )
     vis = trimesh.Scene([_scene_vis, scene_refs])
-    for T_model2scene, m_r, score in poses:
-        model_vis = _model_vis.copy()
-        color = (*np.random.randint(0, 255, size=3), 255)
-        model_vis.visual.vertex_colors = [color for _ in model_vis.vertices]
-        model_vis.apply_transform(T_model2scene)
-        vis.add_geometry(model_vis)
+    for idx, (T_model2scene, score) in enumerate(poses):
+        vis.add_geometry(_model_orig, transform=T_model2scene, geom_name=f"match_pts_{idx}")
+        vis.add_geometry(_model_vis, transform=T_model2scene, geom_name=f"match_{idx}")
 
         print("Score", score)
         print(np.around(T_model2scene, decimals=2))
         print()
-    vis.show()
 
+    prior_model = _model_vis.copy()
+    prior_model.visual.vertex_colors = (128, 128, 128)
+    for T_model2scene, score in poses_orig:
+        vis.add_geometry(
+            prior_model, transform=T_model2scene, geom_name="pre_clustering"
+        )
+    Viewer(vis, line_settings={'point_size':10})
+
+
+def verify_poses(poses, scene: trimesh.Trimesh, model: trimesh.Trimesh, dist: float):
+    """ Performs cheap sparse point cloud inlier check """
+
+    out_poses = []
+    n_discarded = 0
+    tree_scene = KDTree(scene.vertices)
+    for pose, score in poses:
+        model_in_pose = model.copy().apply_transform(pose)
+        tree_model = KDTree(model_in_pose.vertices)
+
+        n_neighbs = tree_model.count_neighbors(tree_scene, dist)
+        fraction_matched = n_neighbs / len(model.vertices)
+
+        if fraction_matched < 0.1:
+            n_discarded += 1
+            continue
+
+        out_poses.append((pose, score))
+
+    print(f"Sparse verification discarded {n_discarded} poses")
+    return out_poses
 
 def to_nanobind(arr):
     """
@@ -272,6 +382,9 @@ def align_vectors(a, b):
     """
     Computes rotation matrix that rotates a into b
     """
+
+    assert np.isclose(np.linalg.norm(a), 1), np.linalg.norm(a)
+    assert np.isclose(np.linalg.norm(b), 1), np.linalg.norm(b)
 
     v = np.cross(a, b)
     c = np.dot(a, b)
@@ -387,14 +500,6 @@ def compute_ppf(
     return table, ref2feature, model_alphas
 
 
-def bernstein(vala, valb):
-    """thanks to special sauce https://stackoverflow.com/a/34006336/10059727"""
-    h = 1009
-    h = h * 9176 + vala
-    h = h * 9176 + valb
-    return h
-
-
 def rotation_between(rotmatA, rotmatB):
     """thanks to JonasVautherin https://math.stackexchange.com/q/2113634"""
     assert rotmatA.shape == (3, 3)
@@ -402,7 +507,8 @@ def rotation_between(rotmatA, rotmatB):
 
     r_oa_t = np.transpose(rotmatA)
     r_ab = r_oa_t @ rotmatB
-    return np.arccos((np.trace(r_ab) - 1) / 2)
+    val = (np.trace(r_ab) - 1) / 2
+    return np.arccos(np.clip(val, -1, 1))
 
 
 matA = tf.rotation_matrix(np.pi / 4, [1, 0, 0])[:3, :3]
@@ -432,10 +538,10 @@ def pdist_rot(rot_mats):
     return dists.astype(float)
 
 
-def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
-    rots = np.array([T_m2s[:3, :3] for T_m2s, _, _ in poses])
-    locs = np.array([T_m2s[:3, 3] for T_m2s, _, _ in poses])
-    scores = np.array([score for _, _, score in poses])
+def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vis=None, _model_vis=None):
+    rots = np.array([T_m2s[:3, :3] for T_m2s, _ in poses])
+    locs = np.array([T_m2s[:3, 3] for T_m2s, _ in poses])
+    pose_scores = np.array([score for _, score in poses])
 
     method = "centroid"
 
@@ -445,73 +551,144 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None):
     dist_clusters = fcluster(dist_dendro, dist_max, criterion="distance")
 
     # 2) cluster by rotations
-    # XXX optimize, we can make more smaller cluster problems, since
-    # a cluster across distant poses doesn't make sense
-    rot_dists = pdist_rot(rots)
-    rot_dendor = linkage(rot_dists, method)
-    rot_clusters = fcluster(rot_dendor, rot_max_deg, criterion="distance")
+    rot_dists = pdist_rot(np.asfortranarray(rots))
+    rot_dendro = linkage(rot_dists, method)
+    rot_clusters = fcluster(rot_dendro, rot_max_deg, criterion="distance")
 
     # Combine the two clusterings, by creating new clusters
     # if two poses are in same cluster in loc and rot, they will be in new
     # common cluster (hash of both cluster ids)
-    pose_clusters = bernstein(dist_clusters, rot_clusters)
+    pose_clusters = [
+        int(''.join(f'{ord(char)}' for char in f"{dist},{rot}"))
+        for dist, rot in zip(dist_clusters, rot_clusters)
+    ]
 
     # remap the ludicrous hash values to range 0..num
     _, pose_clusters = np.unique(pose_clusters, return_inverse=True)
 
-    cluster_scores = np.zeros(np.max(pose_clusters) + 1)
-    for pose_score, pose_cluster in zip(scores, pose_clusters):
-        cluster_scores[pose_cluster] += pose_score
+    cluster_score = np.zeros_like(pose_clusters)
+    for pose_score, pose_cluster in zip(pose_scores, pose_clusters):
+        cluster_score[pose_cluster] += pose_score
 
-    best_cluster_idx = np.argmax(cluster_scores)
-    print(
-        "Best cluster",
-        best_cluster_idx,
-        cluster_scores[best_cluster_idx],
-        np.count_nonzero(pose_clusters == best_cluster_idx),
-    )
+    cluster_ts = defaultdict(list)
+    cluster_Rs = defaultdict(list)
+    cluster_size = defaultdict(int)
+    for pose_idx, cluster_idx in enumerate(pose_clusters):
+        cluster_ts[cluster_idx].append(locs[pose_idx])
+        cluster_Rs[cluster_idx].append(rots[pose_idx])
+        cluster_size[cluster_idx] += 1
 
-    plt.hist(cluster_scores, histtype="stepfilled", bins=100)
-    plt.title("Cluster Scores Histogram")
+    print("Info about top-10 clusters:")
+    for cluster_idx in np.argsort(cluster_score)[::-1][:10]:
+        print(
+            f"    cluster {cluster_idx} contains {cluster_size[cluster_idx]} poses, score={cluster_score[cluster_idx]}"
+        )
+
+    geomean = lambda x, y: np.sqrt(x * y)
+    harmmean = lambda x, y: 2 / (1 / (x + 1e-8) + 1 / (y + 1e-8))
+
+    cluster_geoscore = [
+        geomean(cluster_size[cluster_idx], cluster_score[cluster_idx])
+        for cluster_idx in pose_clusters
+    ]
+    cluster_harmscore = [
+        harmmean(cluster_size[cluster_idx], cluster_score[cluster_idx])
+        for cluster_idx in pose_clusters
+    ]
+    cluster_uscore = [cluster_score[cluster_idx] ** 2 for cluster_idx in pose_clusters]
+
+    fig, axs = plt.subplots(ncols=3)
+    axs[0].hist(cluster_score, histtype="stepfilled", bins=100)
+    axs[0].set_yscale("log")
+    axs[0].set_title("Cluster Scores Histogram (Y-Axis logged)")
+    axs[1].hist(cluster_geoscore, histtype="stepfilled", bins=100)
+    axs[1].set_title("Geometric score + number poses")
+    axs[2].hist(cluster_harmscore, histtype="stepfilled", bins=100)
+    axs[2].set_title("Harmonic score + number poses")
+
+    # axs[2].hist(cluster_uscore, histtype="stepfilled", bins=100)
+    # axs[2].set_title("Combined score with num cluster with that score (bin)")
     plt.show()
 
-    out_ts = defaultdict(list)
-    out_Rs = defaultdict(list)
-    for pose_idx, cluster_idx in enumerate(pose_clusters):
-        out_ts[cluster_idx].append(locs[pose_idx])
-        out_Rs[cluster_idx].append(rots[pose_idx])
+    # best_cluster_idx = np.argmax(cluster_harmscore)
+    best_cluster_idx = np.argmax(cluster_score)
+    best_geo_score = cluster_harmscore[best_cluster_idx]
+    best_rel_thresh = 0.15
 
-    sorted_clusters = np.argsort(cluster_scores)[::-1]
-
-    for idx_cluster, top_cluster in enumerate(sorted_clusters[:10]):
-        print(f"cluster {idx_cluster} contains {len(out_ts[top_cluster])} poses")
-
-    geo = lambda x, y: np.sqrt(x * y)
-
-    best_cluster_idx = np.argmax(cluster_scores)
-    best_score = cluster_scores[best_cluster_idx]
-    best_geo_score = geo(best_score, len(out_ts[best_cluster_idx]))
-    best_rel_thresh = 0.5
-
+    print(f"Best score={best_geo_score}, min_needed={best_rel_thresh * best_geo_score}")
+    print("Info about final clusters:")
     out_poses = []
-    for cluster_idx in sorted_clusters:
-        geo_score = geo(len(out_ts[cluster_idx]), cluster_scores[cluster_idx])
-        if geo_score < best_rel_thresh * best_geo_score:
+    for cluster_idx in set(pose_clusters):
+        ts, Rs, score, size = (
+            cluster_ts[cluster_idx],
+            cluster_Rs[cluster_idx],
+            cluster_score[cluster_idx],
+            cluster_size[cluster_idx],
+        )
+        # geo_score = cluster_harmscore[cluster_idx]
+        # if geo_score < best_rel_thresh * best_geo_score:
+        geo_score = score
+        if score < best_rel_thresh * cluster_score[best_cluster_idx]:
             continue
 
-        print("cluster idx", cluster_idx, cluster_scores[cluster_idx], "geoscore", geo_score)
-        ts = out_ts[cluster_idx]
-        Rs = out_Rs[cluster_idx]
+        print(
+            "    cluster",
+            cluster_idx,
+            "plain score",
+            cluster_score[cluster_idx],
+            "geoscore",
+            geo_score,
+        )
 
-        avg_t = np.mean(ts, axis=0)
-        avg_R = average_rotations(Rs)
-        out_T = np.eye(4)
-        out_T[:3, :3] = avg_R[:3, :3]
-        out_T[:3, 3] = avg_t
-        out_poses.append((out_T, 0, geo_score))
+        #sc = trimesh.Scene([_scene_vis])
+        #model = _model_vis.copy()
+        #model.visual.vertex_colors = (255, 255, 0, 128)
+        for R, t in zip(Rs, ts):
+            T = np.eye(4)
+            T[:3, :3] = R
+            T[:3, 3] = t
+            # sc.add_geometry(model, transform=T)
+
+        out_T = average_rotations(Rs)
+        out_T[:3, 3] = np.mean(ts, axis=0)
+        #sc.add_geometry(_model_vis, transform=out_T)
+        #sc.show()
+        assert np.isclose(np.linalg.det(out_T), 1), np.linalg.det(out_T)
+        out_poses.append((out_T, geo_score))
+    
+    # Do non-max-suppression to remove symmetric instances, or simply
+    # duplicates
+    n_before_nms = len(out_poses)
+    out_poses = nms(out_poses, dist_max=dist_max * 2)
+    n_after_nms = len(out_poses)
+    print(f"Got rid of {n_before_nms - n_after_nms} poses with NMS")
 
     print("Returning", len(out_poses), "clustered and averaged poses")
     return out_poses
+
+
+def nms(poses_and_scores, dist_max):
+    if len(poses_and_scores) == 1:
+        return poses_and_scores
+
+    poses_and_scores = np.array(poses_and_scores, dtype=object)
+
+    dist_dists = pdist([T_m2s[:3, 3] for T_m2s, _ in poses_and_scores])
+    dist_dendro = linkage(dist_dists, "centroid")
+    dist_clusters = fcluster(dist_dendro, dist_max, criterion="distance")
+
+    suppressed = []
+    for cluster in np.unique(dist_clusters):
+        cluster_items = poses_and_scores[dist_clusters == cluster]
+        cluster_scores = [score for pose, score in cluster_items]
+        cluster_poses = [pose for pose, score in cluster_items]
+
+        best_idx_in_clust = np.argmax(cluster_scores)
+        best_score_in_clust = cluster_scores[best_idx_in_clust]
+        best_pose_in_clust = cluster_poses[best_idx_in_clust]
+        suppressed.append((best_pose_in_clust, best_score_in_clust))
+
+    return suppressed
 
 
 def average_rotations(rotations):
@@ -528,9 +705,45 @@ def average_rotations(rotations):
     return tf.quaternion_matrix(quat_avg)
 
 
-# trimesh todo
-# - point cloud normals
-# - scipy not in dependencies
+class Viewer(trimesh.viewer.SceneViewer):
+    TOGGLE_PRE_CLUSTER = ord("i")
+    TOGGLE_MATCHES = ord("m")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, start_loop=False)
+
+        self.pre_cluster_visib = True
+        self.matches_visib = True
+
+        print("### Debug Viewer")
+        print(
+            "### To show/hide pre-cluster poses, press", chr(Viewer.TOGGLE_PRE_CLUSTER)
+        )
+        print("### To show/hide matches, press", chr(Viewer.TOGGLE_MATCHES))
+        pyglet.app.run()
+
+    def on_key_press(self, symbol, modifiers):
+        if symbol == Viewer.TOGGLE_PRE_CLUSTER:
+            geoms = [n for n in self.scene.graph.nodes if n.startswith("pre_cluster")]
+            for nodename in geoms:
+                if self.pre_cluster_visib:
+                    self.hide_geometry(nodename)
+                else:
+                    self.unhide_geometry(nodename)
+            self.pre_cluster_visib = not self.pre_cluster_visib
+
+        elif symbol == Viewer.TOGGLE_MATCHES:
+            geoms = [n for n in self.scene.graph.nodes if n.startswith("match")]
+            for nodename in geoms:
+                if self.matches_visib:
+                    self.hide_geometry(nodename)
+                else:
+                    self.unhide_geometry(nodename)
+            self.matches_visib = not self.matches_visib
+
+        elif symbol == ord("q"):
+            super().on_key_press(symbol, modifiers)
+
 
 # Validation
 

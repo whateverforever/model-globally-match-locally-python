@@ -17,6 +17,7 @@ namespace nb = nanobind;
 using namespace nb::literals;
 
 using Feature = std::tuple<uint8_t, uint8_t, uint8_t, uint8_t>;
+using Features = std::vector<Feature>;
 using Ref2Feature = std::map<int, std::map<int, Feature>>;
 using Vec3 = Eigen::Vector3d;
 using Vecs3 = Eigen::MatrixX3d;
@@ -31,20 +32,65 @@ double vectorAngle(const Vec3 &vecA, const Vec3 &vecB) {
 /**
  * Computes the Point-Pair-Feature for two given points and their normals.
  */
-Feature computeFeature(const Vec3 &vecA, const Vec3 &vecB, const Vec3 &normA,
-                       const Vec3 &normB, double step_rad, double step_dist) {
+Features computeFeature(const Vec3 &vecA, const Vec3 &vecB, const Vec3 &normA,
+                        const Vec3 &normB, double step_rad, double step_dist) {
   const Vec3 diffvec = vecA - vecB;
   double F1 = diffvec.norm();
   double F2 = vectorAngle(-diffvec / F1, normA);
   double F3 = vectorAngle(diffvec / F1, normB);
   double F4 = vectorAngle(normA, normB);
 
-  F1 = std::floor(F1 / step_dist);
-  F2 = std::floor(F2 / step_rad);
-  F3 = std::floor(F3 / step_rad);
-  F4 = std::floor(F4 / step_rad);
+  const double F1_raw = F1 / step_dist;
+  const double F2_raw = F2 / step_rad;
+  const double F3_raw = F3 / step_rad;
+  const double F4_raw = F4 / step_rad;
 
-  return {F1, F2, F3, F4};
+  F1 = std::floor(F1_raw);
+  F2 = std::floor(F2_raw);
+  F3 = std::floor(F3_raw);
+  F4 = std::floor(F4_raw);
+
+  const double sigma_dist = step_dist / 3;
+  const double sigma_rad = step_rad / 3;
+
+  Features out;
+  out.push_back({F1, F2, F3, F4});
+
+  // Vidal 2018: check discretization error for potential neigbors canidates
+  double eq1 = F1_raw - F1;
+  if (eq1 < sigma_dist / step_dist) {
+    if (F1 - 1 >= 0)
+      out.push_back({F1 - 1, F2, F3, F4});
+  } else if (eq1 > (1 - sigma_dist / step_dist)) {
+    if (F1 + 1 <= 255)
+      out.push_back({F1 + 1, F2, F3, F4});
+  }
+  double eq2 = F2_raw - F2;
+  if (eq2 < sigma_rad / step_rad) {
+    if (F2 - 1 >= 0)
+      out.push_back({F1, F2 - 1, F3, F4});
+  } else if (eq2 > (1 - sigma_rad / step_rad)) {
+    if (F2 + 1 <= 255)
+      out.push_back({F1, F2 + 1, F3, F4});
+  }
+  double eq3 = F3_raw - F3;
+  if (eq3 < sigma_rad / step_rad) {
+    if (F3 - 1 >= 0)
+      out.push_back({F1, F2, F3 - 1, F4});
+  } else if (eq3 > (1 - sigma_rad / step_rad)) {
+    if (F3 + 1 <= 255)
+      out.push_back({F1, F2, F3 + 1, F4});
+  }
+  double eq4 = F4_raw - F4;
+  if (eq4 < sigma_rad / step_rad) {
+    if (F4 - 1 >= 0)
+      out.push_back({F1, F2, F3, F4 - 1});
+  } else if (eq4 > (1 - sigma_rad / step_rad)) {
+    if (F4 + 1 <= 255)
+      out.push_back({F1, F2, F3, F4 + 1});
+  }
+
+  return out;
 }
 
 double vectorAngleSignedX(const Vec3 &vecA, const Vec3 &vecB) {
@@ -104,14 +150,34 @@ auto computePPF(const Vecs3 &verts, const Vecs3 &normals, double step_rad,
       if (dist > max_dist_sqr)
         continue;
 
-      const auto F =
+      const auto Fs =
           computeFeature(vertA, vertB, normA, normB, step_rad, step_dist);
 
-      if (std::get<0>(F) == 0)
-        continue;
+      for (const auto &F : Fs) {
+        if (std::get<0>(F) == 0)
+          continue;
 
-      ppfs[F].emplace_back(i, j);
-      ref2feature[i][j] = F;
+        ppfs[F].emplace_back(i, j);
+      }
+
+      // Hinterstoisser: Look at all neighbors in feature space
+      // in 4D, we have 2x2x2x2 - 1 = 80 neighbors
+      /*for (int f0 : {-1, 0, 1}) {
+        for (int f1 : {-1, 0, 1}) {
+          for (int f2 : {-1, 0, 1}) {
+            for (int f3 : {-1, 0, 1}) {
+              Feature F_neighbor = F;
+              std::get<0>(F_neighbor) += f0;
+              std::get<1>(F_neighbor) += f1;
+              std::get<2>(F_neighbor) += f2;
+              std::get<3>(F_neighbor) += f3;
+              ppfs[F_neighbor].emplace_back(i, j);
+            }
+          }
+        }
+      }*/
+
+      ref2feature[i][j] = Fs[0];
 
       const Vec3 &m_r = vertA;
       const Vec3 &m_i = vertB;
@@ -136,7 +202,8 @@ double divmod(double x, double y) { return (x - std::fmod(x, y)) / y; }
 double rotationBetween(const Eigen::Matrix3d &rotmatA,
                        const Eigen::Matrix3d &rotmatB) {
   const auto r_ab = rotmatA.transpose() * rotmatB;
-  return std::acos((r_ab.trace() - 1) / 2);
+  const auto val = (r_ab.trace() - 1) / 2;
+  return std::acos(std::clamp(val, -1.0, 1.0));
 }
 
 std::vector<uint8_t> pdistRot(const std::vector<Eigen::Matrix3d> &rot_mats) {
