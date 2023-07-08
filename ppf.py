@@ -156,7 +156,7 @@ def main():
     viewer = Viewer(vis)
 
     ## 1. compute ppfs of all vertex pairs in model, store in hash table
-    angle_step = float(np.radians(360 / args.ppf_num_angles))
+    angle_step = float(np.deg2rad(360 / args.ppf_num_angles))
     dist_step = args.ppf_rel_dist_step * model_diag
     print(f"angle_step={np.rad2deg(angle_step):.1f}d dist_step={dist_step:.2f}")
 
@@ -226,15 +226,23 @@ def main():
 
             alpha_s = scene_alphas[(sA, sB)]
 
+            # Pavel Zednik non-planar voting scheme. Ideally this
+            # would be computed ahead of time, before the feature
+            # gets discretized
+            dot = np.cos(s_feature[-1] * angle_step)
+            vote = 1 - np.abs(dot)
+
             for m_pair in ppfs_model[s_feature]:
                 mA, mB = m_pair
                 alpha_m = model_alphas[m_pair]
                 alpha = alpha_m - alpha_s
 
                 alpha_disc = int(alpha // alpha_step)
-                accumulator[mA, alpha_disc] += 1
-                accumulator[mA, (alpha_disc - 1) % args.alpha_num_angles] += 1
-                accumulator[mA, (alpha_disc + 1) % args.alpha_num_angles] += 1
+
+                # Hinterstoisser accumulator smoothing
+                accumulator[mA, alpha_disc] += vote
+                accumulator[mA, (alpha_disc - 1) % args.alpha_num_angles] += vote
+                accumulator[mA, (alpha_disc + 1) % args.alpha_num_angles] += vote
 
         # We kick out any model ref that doesn't have at least 10% of expected
         # matches
@@ -581,7 +589,7 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vi
     # best_cluster_idx = np.argmax(cluster_harmscore)
     best_cluster_idx = np.argmax(cluster_score)
     best_geo_score = cluster_harmscore[best_cluster_idx]
-    best_rel_thresh = 0.6
+    best_rel_thresh = 0.15
 
     print(f"Best score={best_geo_score}, min_needed={best_rel_thresh * best_geo_score}")
     print("Info about final clusters:")
