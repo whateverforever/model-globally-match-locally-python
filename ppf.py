@@ -312,6 +312,8 @@ def main():
     t_cluster_end = time.perf_counter()
     print(f"Clustering took {t_cluster_end - t_cluster_start:.1f}s")
 
+    poses = verify_poses(poses, scene, model, dist_step/2)
+
     ## Visualize result
     scene_refs = trimesh.PointCloud(
         [scene.vertices[idx] for idx in list(pairs_scene.keys())]
@@ -333,6 +335,28 @@ def main():
         )
     Viewer(vis, line_settings={'point_size':10})
 
+
+def verify_poses(poses, scene: trimesh.Trimesh, model: trimesh.Trimesh, dist: float):
+    """ Performs cheap sparse point cloud inlier check """
+
+    out_poses = []
+    n_discarded = 0
+    tree_scene = KDTree(scene.vertices)
+    for pose, score in poses:
+        model_in_pose = model.copy().apply_transform(pose)
+        tree_model = KDTree(model_in_pose.vertices)
+
+        n_neighbs = tree_model.count_neighbors(tree_scene, dist)
+        fraction_matched = n_neighbs / len(model.vertices)
+
+        if fraction_matched < 0.1:
+            n_discarded += 1
+            continue
+
+        out_poses.append((pose, score))
+
+    print(f"Sparse verification discarded {n_discarded} poses")
+    return out_poses
 
 def to_nanobind(arr):
     """
@@ -634,7 +658,10 @@ def cluster_poses(poses, dist_max=0.5, rot_max_deg=10, pdist_rot=None, _scene_vi
     
     # Do non-max-suppression to remove symmetric instances, or simply
     # duplicates
+    n_before_nms = len(out_poses)
     out_poses = nms(out_poses, dist_max=dist_max * 2)
+    n_after_nms = len(out_poses)
+    print(f"Got rid of {n_before_nms - n_after_nms} poses with NMS")
 
     print("Returning", len(out_poses), "clustered and averaged poses")
     return out_poses
